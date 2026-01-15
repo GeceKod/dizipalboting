@@ -1,274 +1,275 @@
-import requests
+import cloudscraper
 from bs4 import BeautifulSoup
-import time
 import json
-import html
 import os
+import time
 from urllib.parse import urlparse
 
 # --- AYARLAR ---
-# Site adresi değiştiğinde GitHub Secret'tan veya buradan güncelleyebilirsin.
 BASE_URL = os.environ.get('SITE_URL', 'https://dizipal1225.com/filmler')
 DATA_FILE = 'movies.json'
 HTML_FILE = 'index.html'
 
-def get_soup(url):
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+# Siteyi yormamak için her sayfa isteği arası bekleme (saniye)
+DELAY = 1 
+
+def get_base_domain(url):
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+def parse_html_content(soup, base_domain):
+    """Verilen HTML parçasındaki (Soup) filmleri ayıklar."""
+    films = []
+    # Genelde li etiketi içindedir
+    elements = soup.find_all('li')
+    
+    # Eğer li bulamazsa div class="movie-item" dener
+    if not elements:
+        elements = soup.select('.movie-item') or soup.select('.item')
+
+    for el in elements:
+        try:
+            # Data ID (Sonraki sayfayı çekmek için gerekli)
+            # Genelde <a> etiketinin içinde data-id olur
+            link_el = el.find('a')
+            movie_id = link_el.get('data-id') if link_el else None
+            
+            # Başlık
+            title_el = el.find('span', class_='title') or el.find('h2') or el.find('h3')
+            title = title_el.text.strip() if title_el else "Isimsiz"
+            
+            # Resim
+            img_el = el.find('img')
+            image = img_el['src'] if img_el else ""
+            
+            # Link
+            href = link_el['href'] if link_el else ""
+            if href and not href.startswith('http'):
+                href = base_domain + href
+                
+            # Türler, Yıl vb (Varsa)
+            year_el = el.find('span', class_='year')
+            year = year_el.text.strip() if year_el else "-"
+            
+            imdb_el = el.find('span', class_='imdb')
+            imdb = imdb_el.text.strip() if imdb_el else "-"
+
+            if title != "Isimsiz" and href:
+                films.append({
+                    "id": movie_id, # Sonraki sayfa için önemli
+                    "title": title,
+                    "image": image,
+                    "url": href,
+                    "year": year,
+                    "imdb": imdb,
+                    "videoUrl": href # Şimdilik siteye yönlendirsin
+                })
+        except Exception as e:
+            continue
+            
+    return films
+
+def get_all_films():
+    scraper = cloudscraper.create_scraper(delay=10)
+    base_domain = get_base_domain(BASE_URL)
+    api_url = f"{base_domain}/api/load-movies"
+    
+    all_films = []
+    processed_titles = set()
+    
+    print(f"Tarama Basliyor: {BASE_URL}")
+    print("------------------------------------------------")
+
+    # 1. ILK SAYFAYI CEK
     try:
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        return BeautifulSoup(response.content, 'html.parser')
+        response = scraper.get(BASE_URL, timeout=30)
+        if response.status_code != 200:
+            print(f"Siteye girilemedi. Kod: {response.status_code}")
+            return []
+        
+        soup = BeautifulSoup(response.content, 'html.parser')
+        new_films = parse_html_content(soup, base_domain)
+        
+        for f in new_films:
+            if f['title'] not in processed_titles:
+                all_films.append(f)
+                processed_titles.add(f['title'])
+        
+        print(f"Sayfa 1 Tamamlandi. Toplam Film: {len(all_films)}")
+        
     except Exception as e:
-        print(f"Hata: {url} adresine erişilemiyor. {e}")
-        return None
+        print(f"Ilk sayfa hatasi: {e}")
+        return []
 
-def get_film_info(film_element, base_domain):
-    try:
-        title_element = film_element.find('span', class_='title')
-        title = html.unescape(title_element.text.strip()) if title_element else "Baslik Bulunamadi"
-        
-        image_element = film_element.find('img')
-        image = image_element['src'] if image_element else ""
-        
-        url_element = film_element.find('a')
-        url = base_domain + url_element['href'] if url_element else ""
-        
-        year_element = film_element.find('span', class_='year')
-        year = html.unescape(year_element.text.strip()) if year_element else "Unknown"
-        
-        duration_element = film_element.find('span', class_='duration')
-        duration = html.unescape(duration_element.text.strip()) if duration_element else "-"
-        
-        imdb_element = film_element.find('span', class_='imdb')
-        imdb = html.unescape(imdb_element.text.strip()) if imdb_element else "-"
-        
-        genres_element = film_element.find('span', class_='genres_x')
-        genres = html.unescape(genres_element.text.strip()).split(', ') if genres_element else []
-        
-        summary_element = film_element.find('span', class_='summary')
-        summary = html.unescape(summary_element.text.strip()) if summary_element else ""
-        
-        return {
-            'title': title,
-            'image': image,
-            'videoUrl': "", # Video linki dinamik olarak sonra alınır veya iframe linki
-            'url': url,
-            'year': year,
-            'duration': duration,
-            'imdb': imdb,
-            'genres': genres,
-            'summary': summary
-        }
-    except Exception:
-        return None
-
-def get_video_link(url):
-    soup = get_soup(url)
-    if not soup: return None
-    iframe = soup.find('iframe', id='iframe')
-    if iframe and 'src' in iframe.attrs:
-        return iframe['src']
-    return None
-
-def load_existing_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return []
-
-def save_data(data):
-    with open(DATA_FILE, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-
-def get_new_films():
-    """Sadece ilk sayfaları tarayıp yeni filmleri alır."""
-    parsed_uri = urlparse(BASE_URL)
-    base_domain = f"{parsed_uri.scheme}://{parsed_uri.netloc}"
+    # 2. LOAD MORE DONGUSU (SONSUZ KAYDIRMA)
+    page_count = 1
     
-    print(f"Tarama başlıyor: {BASE_URL}")
-    soup = get_soup(BASE_URL)
-    if not soup: return []
-
-    new_films = []
-    
-    # Sadece ana sayfadaki (veya ilk yüklenen) filmleri çekelim
-    # Hepsini çekmek istersek while döngüsü gerekir ama botu hızlandırmak için
-    # ve sadece "yeni eklenenleri" istediğin için ilk sayfa yeterli olabilir.
-    # Daha derin tarama için buraya 'load more' mantığı eklenebilir.
-    
-    film_elements = soup.find_all('li', class_='')
-    print(f"Sayfada {len(film_elements)} film bulundu.")
-
-    for element in film_elements:
-        film_info = get_film_info(element, base_domain)
-        if film_info:
-            # Video linkini al
-            video_link = get_video_link(film_info['url'])
-            if video_link:
-                film_info['videoUrl'] = video_link
-                new_films.append(film_info)
-                print(f"Bulundu: {film_info['title']}")
-            time.sleep(0.5) # Sunucuyu yormamak için kısa bekleme
+    while True:
+        if not all_films:
+            break
             
-    return new_films
-
-def merge_films(existing, new_found):
-    """Mevcut filmlerle yenileri birleştirir, tekrarları önler."""
-    existing_titles = {f['title'] for f in existing}
-    added_count = 0
-    
-    # Yeni bulunanları listenin başına ekleyelim (En yeniler üstte olsun)
-    for film in reversed(new_found):
-        if film['title'] not in existing_titles:
-            existing.insert(0, film)
-            existing_titles.add(film['title'])
-            added_count += 1
-            print(f"Yeni Eklendi: {film['title']}")
+        # Son eklenen filmin ID'sini al (API buna göre sıradakileri verir)
+        last_film = all_films[-1]
+        last_id = last_film.get('id')
+        
+        if not last_id:
+            print("Son film ID'si bulunamadi, dongu bitiyor.")
+            break
             
-    return existing, added_count
+        print(f"Siradaki sayfa isteniyor (Son ID: {last_id})...")
+        
+        try:
+            # API'ye istek at
+            payload = {
+                'movie': last_id,
+                'year': '',
+                'tur': '',
+                'siralama': ''
+            }
+            # Burasi kritik: API istegi post ile yapilir
+            api_response = scraper.post(api_url, data=payload, timeout=20)
+            
+            if api_response.status_code != 200:
+                print(f"API Hatasi: {api_response.status_code}")
+                break
+                
+            try:
+                data = api_response.json()
+            except:
+                print("API JSON dondurmedi, islem bitti.")
+                break
+                
+            if not data.get('html'):
+                print("Daha fazla film yok (HTML bos).")
+                break
+                
+            # Gelen HTML parcasini işle
+            soup = BeautifulSoup(data['html'], 'html.parser')
+            more_films = parse_html_content(soup, base_domain)
+            
+            added_count = 0
+            for f in more_films:
+                if f['title'] not in processed_titles:
+                    all_films.append(f)
+                    processed_titles.add(f['title'])
+                    added_count += 1
+            
+            page_count += 1
+            print(f"Sayfa {page_count} eklendi. (+{added_count} film). Toplam: {len(all_films)}")
+            
+            if added_count == 0:
+                print("Yeni film gelmedi, dongu bitiriliyor.")
+                break
+                
+            time.sleep(DELAY) # Siteyi yormamak icin bekle
+            
+        except Exception as e:
+            print(f"Dongu hatasi: {e}")
+            break
+            
+    return all_films
 
 def create_html(films):
-    # Türleri topla
-    all_genres = set()
-    for film in films:
-        for genre in film.get('genres', []):
-            if genre and genre != "Tür Belirtilmemiş":
-                all_genres.add(genre)
-    
     films_json = json.dumps(films, ensure_ascii=False)
-    genres_json = json.dumps(sorted(list(all_genres)), ensure_ascii=False)
     
-    # Senin orijinal HTML şablonun (değişmedi)
     html_template = f"""<!DOCTYPE html>
 <html lang="tr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Dizipal Arşiv</title>
+    <title>Dizipal Dev Arsiv</title>
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; margin: 0; padding: 0; background-color: #344966; color: #fff; }}
-        .header {{ position: fixed; top: 0; left: 0; right: 0; background-color: #2c3e50; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; z-index: 1000; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }}
-        h1 {{ margin: 0; color: #ecf0f1; font-size: 1.5em; }}
-        .controls {{ display: flex; align-items: center; gap: 10px; }}
-        #searchInput {{ padding: 8px; border-radius: 5px; border: none; }}
-        #genreSelect {{ padding: 8px; border-radius: 5px; }}
-        .film-container {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 15px; margin-top: 80px; padding: 20px; }}
-        .film-card {{ position: relative; overflow: hidden; border-radius: 8px; background-color: #496785; box-shadow: 0 4px 8px rgba(0,0,0,0.3); transition: transform 0.2s; cursor: pointer; }}
-        .film-card:hover {{ transform: translateY(-5px); }}
-        .film-card img {{ width: 100%; display: block; aspect-ratio: 2 / 3; object-fit: cover; }}
-        .film-title {{ padding: 10px; font-weight: bold; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
-        .modal {{ display: none; position: fixed; z-index: 1001; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.8); }}
-        .modal-content {{ background-color: #2c3e50; margin: 5% auto; padding: 20px; width: 90%; max-width: 700px; border-radius: 10px; position: relative; }}
-        .close {{ position: absolute; right: 15px; top: 10px; font-size: 30px; cursor: pointer; }}
-        .btn-watch {{ display: inline-block; padding: 10px 20px; background: #3498db; color: white; text-decoration: none; border-radius: 5px; margin-top: 10px; }}
+        body {{ background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin:0; padding:0; }}
+        .header {{ background-color: #1f1f1f; padding: 20px; position: sticky; top: 0; z-index: 100; box-shadow: 0 2px 10px rgba(0,0,0,0.5); display: flex; justify-content: space-between; align-items: center; }}
+        h1 {{ margin: 0; font-size: 1.5rem; color: #e50914; }}
+        #search {{ padding: 10px; border-radius: 5px; border: none; width: 200px; background: #333; color: white; }}
+        .stats {{ font-size: 0.9rem; color: #888; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 20px; padding: 20px; }}
+        .card {{ background: #1f1f1f; border-radius: 8px; overflow: hidden; transition: transform 0.2s; position: relative; }}
+        .card:hover {{ transform: scale(1.05); z-index: 10; box-shadow: 0 5px 15px rgba(0,0,0,0.5); }}
+        .card img {{ width: 100%; height: 240px; object-fit: cover; }}
+        .info {{ padding: 10px; }}
+        .title {{ font-weight: bold; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-bottom: 5px; }}
+        .meta {{ font-size: 0.8rem; color: #aaa; display: flex; justify-content: space-between; }}
+        .imdb {{ color: #f5c518; font-weight: bold; }}
+        .btn {{ display: block; width: 100%; padding: 8px 0; background: #e50914; color: white; text-align: center; text-decoration: none; font-size: 0.9rem; margin-top: 10px; border-radius: 4px; }}
+        .btn:hover {{ background: #b20710; }}
     </style>
 </head>
 <body>
     <div class="header">
-        <h1>Film Arşivi ({len(films)})</h1>
-        <div class="controls">
-            <select id="genreSelect" onchange="filterFilms()"><option value="">Tüm Türler</option></select>
-            <input type="text" id="searchInput" placeholder="Ara..." oninput="filterFilms()">
+        <div>
+            <h1>Arsiv Botu</h1>
+            <span class="stats" id="count">Toplam: 0 Film</span>
         </div>
+        <input type="text" id="search" placeholder="Film Ara..." oninput="filterFilms()">
     </div>
-    <div class="film-container" id="filmContainer"></div>
-
-    <div id="filmModal" class="modal">
-        <div class="modal-content">
-            <span class="close" onclick="closeModal()">&times;</span>
-            <h2 id="mTitle"></h2>
-            <p id="mInfo"></p>
-            <p id="mSummary"></p>
-            <a id="mLink" class="btn-watch" target="_blank">İzle</a>
-        </div>
-    </div>
+    
+    <div class="grid" id="grid"></div>
 
     <script>
         const films = {films_json};
-        const genres = {genres_json};
-        
-        // Populate Genres
-        const genreSelect = document.getElementById('genreSelect');
-        genres.forEach(g => {{
-            const opt = document.createElement('option');
-            opt.value = g;
-            opt.innerText = g;
-            genreSelect.appendChild(opt);
-        }});
+        const grid = document.getElementById('grid');
+        const countLabel = document.getElementById('count');
 
         function render(list) {{
-            const container = document.getElementById('filmContainer');
-            container.innerHTML = list.slice(0, 100).map(f => `
-                <div class="film-card" onclick='showModal("${{f.title.replace(/'/g, "\\'") }}")'>
-                    <img src="${{f.image}}" loading="lazy">
-                    <div class="film-title">${{f.title}}</div>
+            countLabel.innerText = `Toplam: ${{list.length}} Film`;
+            // Performans için ilk 100 filmi goster, sonra scroll ettikce acilabilir ama basit tutalim
+            // Hepsini basarsak tarayici kasabilir 3000 filmde.
+            // Bu ornekte ilk 500'u gosterelim, arama yapinca hepsi icinde arar.
+            
+            const displayList = list.length > 500 && document.getElementById('search').value === '' ? list.slice(0, 500) : list;
+            
+            grid.innerHTML = displayList.map(f => `
+                <div class="card">
+                    <img src="${{f.image}}" loading="lazy" onerror="this.src='https://via.placeholder.com/160x240?text=Resim+Yok'">
+                    <div class="info">
+                        <div class="title" title="${{f.title.replace(/"/g, '&quot;')}}">${{f.title}}</div>
+                        <div class="meta">
+                            <span>${{f.year}}</span>
+                            <span class="imdb">★ ${{f.imdb}}</span>
+                        </div>
+                        <a href="${{f.url}}" target="_blank" class="btn">Izle</a>
+                    </div>
                 </div>
             `).join('');
-            // Not: Performans için sadece ilk 100 gösteriliyor, arama yapıldıkça diğerleri gelir.
-            if(document.getElementById('searchInput').value) {{
-                 container.innerHTML = list.map(f => `
-                <div class="film-card" onclick='showModal("${{f.title.replace(/'/g, "\\'") }}")'>
-                    <img src="${{f.image}}" loading="lazy">
-                    <div class="film-title">${{f.title}}</div>
-                </div>
-            `).join('');
+            
+            if(list.length > 500 && document.getElementById('search').value === '') {{
+                const moreMsg = document.createElement('div');
+                moreMsg.style.gridColumn = "1 / -1";
+                moreMsg.style.textAlign = "center";
+                moreMsg.style.padding = "20px";
+                moreMsg.innerHTML = "<p>Performans icin sadece son 500 film gosteriliyor. Aradığınız film icin yukaridan arama yapin.</p>";
+                grid.appendChild(moreMsg);
             }}
         }}
 
         function filterFilms() {{
-            const s = document.getElementById('searchInput').value.toLowerCase();
-            const g = document.getElementById('genreSelect').value;
-            const filtered = films.filter(f => {{
-                return (f.title.toLowerCase().includes(s) || f.genres.join(',').toLowerCase().includes(s)) &&
-                       (g === "" || f.genres.includes(g));
-            }});
+            const query = document.getElementById('search').value.toLowerCase();
+            const filtered = films.filter(f => f.title.toLowerCase().includes(query));
             render(filtered);
         }}
 
-        function showModal(title) {{
-            const f = films.find(x => x.title === title);
-            if(f) {{
-                document.getElementById('mTitle').innerText = f.title;
-                document.getElementById('mInfo').innerText = `${{f.year}} | ${{f.imdb}} | ${{f.duration}}`;
-                document.getElementById('mSummary').innerText = f.summary;
-                document.getElementById('mLink').href = f.videoUrl;
-                document.getElementById('filmModal').style.display = 'block';
-            }}
-        }}
-
-        function closeModal() {{ document.getElementById('filmModal').style.display = 'none'; }}
-        window.onclick = function(e) {{ if(e.target == document.getElementById('filmModal')) closeModal(); }}
-
+        // Baslangic
         render(films);
     </script>
 </body>
-</html>
-    """
+</html>"""
     
     with open(HTML_FILE, 'w', encoding='utf-8') as f:
         f.write(html_template)
-    print(f"HTML güncellendi: {HTML_FILE}")
-
-def main():
-    # 1. Mevcut veriyi yükle
-    existing_data = load_existing_data()
-    print(f"Mevcut film sayısı: {len(existing_data)}")
     
-    # 2. Yeni verileri siteden çek
-    new_found_data = get_new_films()
-    
-    # 3. Birleştir
-    merged_data, added_count = merge_films(existing_data, new_found_data)
-    
-    # 4. JSON olarak kaydet
-    if added_count > 0 or not os.path.exists(HTML_FILE):
-        save_data(merged_data)
-        create_html(merged_data)
-        print(f"İşlem tamam. {added_count} yeni film eklendi.")
-    else:
-        print("Yeni film bulunamadı, dosya güncellenmedi.")
+    # Verileri kaydet (Yedek)
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(films, f, ensure_ascii=False)
 
 if __name__ == "__main__":
-    main()
+    # Onceki verileri de yuklemek istersen load_existing eklenebilir ama
+    # Temiz baslangic en sagliklisidir.
+    films = get_all_films()
+    
+    if films:
+        create_html(films)
+        print(f"ISLEM TAMAM: {len(films)} film kaydedildi.")
+    else:
+        print("Hic film bulunamadi.")
