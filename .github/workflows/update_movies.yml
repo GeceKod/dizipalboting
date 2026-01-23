@@ -1,40 +1,19 @@
-name: Film Botu Güncelleyici
-
-on:
-  schedule:
-    - cron: '0 0,12 * * *'
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  update-movies:
-    runs-on: ubuntu-latest
-
-    steps:
-    - name: Depoyu Cek
-      uses: actions/checkout@v3
-
-    - name: Python Kurulumu
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.9'
-
-    - name: Kutuphaneleri Yukle
-      run: |
-        pip install -r requirements.txt
-
-    - name: Botu Calistir
-      env:
-        SITE_URL: ${{ secrets.SITE_URL || 'https://dizipal1225.com/filmler' }}
-      run: python main.py
-
-    - name: Degisiklikleri Kaydet
+- name: Degisiklikleri Kaydet
       run: |
         git config --global user.name "Film Botu"
         git config --global user.email "bot@github.com"
+        
+        # 1. Önce sitedeki son değişiklikleri çekip birleştirmeye çalış
+        git pull origin main --no-edit || echo "Zaten güncel veya birleştirilemedi"
+        
+        # 2. Yeni dosyaları ekle
         git add .
+        
+        # 3. Kaydet
         git commit -m "Otomatik guncelleme" || echo "Degisiklik yok"
-        git pull --rebase origin main
+        
+        # 4. Yüklemeden hemen önce tekrar kontrol et (Çatışmayı önler)
+        git pull origin main --rebase
+        
+        # 5. Yükle
         git push
