@@ -11,7 +11,7 @@ BASE_URL = os.environ.get('SITE_URL', 'https://dizipal1225.com/filmler')
 DATA_FILE = 'movies.json'
 HTML_FILE = 'index.html'
 
-# SENİN GÖNDERDİĞİN HTML'DEN ÇIKARILAN SABİT LİSTE
+# Dizipal Kaynak Kodundan Alınan Sabit Kategoriler
 FIXED_GENRES = [
     "Aile", "Aksiyon", "Animasyon", "Anime", "Belgesel", "Bilimkurgu", 
     "Biyografi", "Dram", "Editörün Seçtikleri", "Erotik", "Fantastik", 
@@ -24,226 +24,204 @@ def get_base_domain(url):
     parsed = urlparse(url)
     return f"{parsed.scheme}://{parsed.netloc}"
 
-def get_soup(url, method='GET', data=None):
-    """Standart Requests Bağlantısı."""
+def get_soup(url):
+    """Senin verdigin ornekteki basit baglanti fonksiyonu."""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': BASE_URL,
-        'Origin': get_base_domain(BASE_URL),
-        'X-Requested-With': 'XMLHttpRequest'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
     }
     try:
-        if method == 'POST':
-            response = requests.post(url, headers=headers, data=data, timeout=20)
-        else:
-            response = requests.get(url, headers=headers, timeout=20)
-            
-        if response.status_code != 200:
-            print(f"HATA: Site cevap vermedi ({response.status_code})")
-            return None
-            
-        if method == 'POST':
-            try:
-                return response.json()
-            except:
-                return None
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
         return BeautifulSoup(response.content, 'html.parser')
     except Exception as e:
-        print(f"Bağlantı sorunu: {e}")
+        print(f"Hata: {url} adresine erisilemiyor. Mesaj: {e}")
         return None
 
-def get_movie_details(movie_url):
-    """Filmin içine girip detayları (Video, Özet, Tür) alır."""
-    info = {
-        'videoUrl': movie_url,
-        'summary': 'Özet yok.',
-        'genres': [],
-        'duration': '',
-        'imdb': '',
-        'year': ''
-    }
-    
-    soup = get_soup(movie_url)
+def get_video_link(url):
+    """
+    Filmin sayfasina girer ve iframe linkini alir.
+    Senin ornek kodundaki fonksiyonun aynisi.
+    """
+    soup = get_soup(url)
     if not soup:
-        return info
+        return None
+    iframe = soup.find('iframe', id='iframe')
+    if iframe and 'src' in iframe.attrs:
+        return iframe['src']
+    # Iframe yoksa sayfa linkini dondur, hic yoktan iyidir
+    return url
 
+def get_film_info(film_element, base_domain):
+    """
+    Senin kodundaki ayiklama mantiginin AYNISI.
+    Ozel class aramaz, elementin icine bakar.
+    """
     try:
-        # 1. Video Linki
-        iframe = soup.find('iframe', id='iframe')
-        if iframe and 'src' in iframe.attrs:
-            info['videoUrl'] = iframe['src']
-            
-        # 2. Özet
-        summary_el = soup.select_one('.ozet-text') or soup.select_one('.summary') or soup.find('article')
-        if summary_el:
-            info['summary'] = html.unescape(summary_el.text.strip())
-            
-        # 3. Türler (Otomatik Algılama)
-        genre_links = soup.select('.tur a') or soup.select('.genres a') or soup.select('.genre a')
-        if genre_links:
-            info['genres'] = [html.unescape(g.text.strip()) for g in genre_links]
-            
-        # 4. Süre
-        duration_el = soup.select_one('.sure') or soup.select_one('.duration')
-        if duration_el:
-            info['duration'] = html.unescape(duration_el.text.strip())
-            
-        # 5. IMDB ve Yıl
-        imdb_el = soup.select_one('.imdb')
-        if imdb_el: info['imdb'] = imdb_el.text.strip()
+        title_element = film_element.find('span', class_='title')
+        # Eger baslik yoksa bu bir film degildir, bos don.
+        if not title_element: return None
         
-        year_el = soup.select_one('.vizyon-tarihi') or soup.select_one('.year')
-        if year_el: info['year'] = year_el.text.strip()
+        title = html.unescape(title_element.text.strip())
+        
+        image_element = film_element.find('img')
+        image = ""
+        if image_element:
+            # Bazen data-src, bazen src kullanilir
+            image = image_element.get('data-src') or image_element.get('src') or ""
+            if image.startswith('//'): image = 'https:' + image
+        
+        url_element = film_element.find('a')
+        url = ""
+        if url_element:
+            href = url_element['href']
+            url = base_domain + href if not href.startswith('http') else href
+        
+        year_element = film_element.find('span', class_='year')
+        year = html.unescape(year_element.text.strip()) if year_element else ""
+        
+        duration_element = film_element.find('span', class_='duration')
+        duration = html.unescape(duration_element.text.strip()) if duration_element else ""
+        
+        imdb_element = film_element.find('span', class_='imdb')
+        imdb = html.unescape(imdb_element.text.strip()) if imdb_element else ""
+        
+        genres_element = film_element.find('span', class_='genres_x')
+        genres = []
+        if genres_element:
+            text = html.unescape(genres_element.text.strip())
+            genres = text.split(', ') if text else []
+        
+        summary_element = film_element.find('span', class_='summary')
+        summary = html.unescape(summary_element.text.strip()) if summary_element else ""
+        
+        # ID al (Load More icin gerekli)
+        movie_id = None
+        if url_element and 'data-id' in url_element.attrs:
+            movie_id = url_element['data-id']
 
+        return {
+            'id': movie_id,
+            'title': title,
+            'image': image,
+            'videoUrl': "", # Sonra doldurulacak
+            'url': url,
+            'year': year,
+            'duration': duration,
+            'imdb': imdb,
+            'genres': genres,
+            'summary': summary
+        }
+    except Exception:
+        return None
+
+def load_more_movies(api_url, last_movie_id):
+    """API uzerinden daha fazla film yukler (Senin kodun aynisi)."""
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'X-Requested-With': 'XMLHttpRequest'
+    }
+    data = {
+        'movie': last_movie_id,
+        'year': '',
+        'tur': '',
+        'siralama': ''
+    }
+    try:
+        response = requests.post(api_url, headers=headers, data=data, timeout=15)
+        response.raise_for_status()
+        return response.json()
     except Exception as e:
-        print(f"Detay hatası: {e}")
-        
-    return info
+        print(f"API Hatasi: {e}")
+        return None
 
-def parse_films_from_list(soup, base_domain):
-    """
-    DÜZELTİLDİ: Senin gönderdiğin kaynak koda göre
-    '.movie-type-genres ul li' yapısını arar.
-    """
+def get_films():
     films = []
-    # BURASI DÜZELTİLDİ: Doğrudan doğruya senin sitendeki yapi
-    container = soup.select_one('.movie-type-genres ul')
-    if container:
-        elements = container.find_all('li')
-    else:
-        # Alternatif (Arama sonuclarinda farkli olabilir)
-        elements = soup.select('li.movie-item') or soup.find_all('li')
-
-    print(f"Bulunan element sayısı: {len(elements)}")
-
-    for el in elements:
-        try:
-            link_el = el.find('a')
-            if not link_el: continue
-            
-            movie_id = link_el.get('data-id')
-            href = link_el.get('href', '')
-            
-            if href and not href.startswith('http'):
-                full_url = base_domain + href
-            else:
-                full_url = href
-
-            title_el = el.find('span', class_='title')
-            title = title_el.text.strip() if title_el else "İsimsiz"
-            
-            # Resim
-            img_el = el.find('img')
-            # Data-src varsa onu al, yoksa src al
-            image = ""
-            if img_el:
-                image = img_el.get('data-src') or img_el.get('src') or ""
-                # Bazen resimler 'https://image.tmdb.org' baslangici olmadan gelebilir
-                if image.startswith('//'):
-                    image = 'https:' + image
-
-            if title != "İsimsiz" and "dizipal" in full_url:
-                films.append({
-                    "id": movie_id,
-                    "title": html.unescape(title),
-                    "image": image,
-                    "url": full_url
-                })
-        except:
-            continue
-    return films
-
-def get_all_films():
     base_domain = get_base_domain(BASE_URL)
     api_url = f"{base_domain}/api/load-movies"
     
-    all_films = []
-    processed_titles = set()
-    
-    print(f"TARAMA BAŞLIYOR: {BASE_URL}")
-    
-    # --- 1. SAYFA ---
+    print(f"Baslangic URL: {BASE_URL}")
+    print("Yontem: Kaba Kuvvet (Butun <li> elementleri taranacak)")
+
     soup = get_soup(BASE_URL)
     if not soup:
-        print("Siteye erişilemedi.")
-        return []
+        return films
 
-    # Hata ayiklama: Site basligini yazdir
-    if soup.title:
-        print(f"Site Başlığı: {soup.title.text.strip()}")
-
-    new_films = parse_films_from_list(soup, base_domain)
+    processed_film_titles = set()
     
-    for f in new_films:
-        if f['title'] not in processed_titles:
-            print(f">> İnceleniyor: {f['title']}")
-            details = get_movie_details(f['url'])
-            f.update(details)
-            
-            all_films.append(f)
-            processed_titles.add(f['title'])
-            time.sleep(0.2) 
-            
-    print(f"Sayfa 1 Bitti. ({len(all_films)} Film)")
-
-    # --- 2. DÖNGÜ (SONSUZ) ---
-    page = 1
-    MAX_PAGES = 5000 
+    # Ilk Sayfa ve Sonsuz Dongu
+    # Donguyu kirmamak icin `while True` kullanacagiz ama soup degisecek
+    current_soup = soup
+    page_count = 1
     
-    while page < MAX_PAGES:
-        if not all_films: break
+    while True:
+        # Sayfadaki TUM li elementlerini bul (Generic Arama)
+        film_elements = current_soup.find_all('li')
         
-        last_film = all_films[-1]
-        last_id = last_film.get('id')
-        
-        if not last_id:
-            print("Son film ID'si yok, döngü bitti.")
+        if not film_elements:
+            print("Film elementi bulunamadi. Dongu bitiyor.")
             break
             
-        print(f"Sıradaki sayfa isteniyor... (Ref ID: {last_id})")
+        new_films_on_page = 0
+        last_movie_id = None
         
-        payload = {'movie': last_id, 'year': '', 'tur': '', 'siralama': ''}
-        data = get_soup(api_url, method='POST', data=payload)
-        
-        if not data or not data.get('html'):
-            print("Daha fazla film gelmedi.")
-            break
+        for element in film_elements:
+            film_info = get_film_info(element, base_domain)
             
-        html_part = BeautifulSoup(data['html'], 'html.parser')
-        more_films = parse_films_from_list(html_part, base_domain)
-        
-        added_count = 0
-        for f in more_films:
-            if f['title'] not in processed_titles:
-                details = get_movie_details(f['url'])
-                f.update(details)
+            if film_info and film_info['title'] not in processed_film_titles:
+                # Video linkini al (Senin istegin uzerine her filmde iceri girip bakacak)
+                # Bu islem yavastir ama istedigin budur.
+                print(f">> Isleniyor: {film_info['title']}")
+                video_link = get_video_link(film_info['url'])
+                film_info['videoUrl'] = video_link
                 
-                all_films.append(f)
-                processed_titles.add(f['title'])
-                added_count += 1
-                time.sleep(0.2)
+                films.append(film_info)
+                processed_film_titles.add(film_info['title'])
+                new_films_on_page += 1
+                
+                # Son filmin ID'sini kaydet (Sonraki sayfa icin)
+                if film_info['id']:
+                    last_movie_id = film_info['id']
+                
+                time.sleep(0.1) # Sunucuyu patlatmamak icin minik bekleme
+
+        print(f"Sayfa {page_count} Bitti. Toplam Film: {len(films)}")
+
+        # Eger bu sayfada hic yeni film bulamadiysak veya son ID yoksa bitir
+        if new_films_on_page == 0 or not last_movie_id:
+            print("Yeni film gelmedi veya ID yok. Bitti.")
+            break
+
+        # Sonraki sayfayi API'den iste
+        print(f"Daha fazla film yukleniyor (Son ID: {last_movie_id})...")
+        more_data = load_more_movies(api_url, last_movie_id)
         
-        if added_count == 0:
-            print("Yeni film bulunamadı. Bitti.")
+        if more_data and more_data.get('html'):
+            current_soup = BeautifulSoup(more_data['html'], 'html.parser')
+            page_count += 1
+        else:
+            print("Daha fazla veri gelmedi.")
             break
             
-        page += 1
-        print(f"--- Sayfa {page} Tamamlandı. Toplam: {len(all_films)} Film ---")
+        # GUVEVNLI MOD: GitHub Actions suresi dolmasin diye 1000 filmde duralim mi?
+        # Istersen bu if blogunu silebilirsin.
+        if len(films) >= 3000:
+            print("Guvenlik limiti: 3000 film. Durduruluyor.")
+            break
 
-    return all_films
+    return films
 
 def get_all_genres(films):
-    # Sabit liste ile dinamik listeyi birleştir
+    # Sabit liste + Dinamik liste
     all_genres = set(FIXED_GENRES)
     for film in films:
         for genre in film.get('genres', []):
-            if genre and len(genre) > 1 and genre != "Tür Belirtilmemiş":
+            if genre and genre != "Tür Belirtilmemiş":
                 all_genres.add(genre)
     return sorted(list(all_genres))
 
 def create_html(films):
     all_genres = get_all_genres(films)
-    
     films_json = json.dumps(films, ensure_ascii=False)
     genres_json = json.dumps(all_genres, ensure_ascii=False)
     
@@ -392,6 +370,6 @@ def create_html(films):
         json.dump(films, f, ensure_ascii=False)
 
 if __name__ == "__main__":
-    data = get_all_films()
+    data = get_films() # get_all_films degil, cunku adini degistirdik
     if data:
         create_html(data)
