@@ -7,8 +7,8 @@ import os
 
 # --- AYARLAR ---
 BASE_DOMAIN = "https://dizipal.cx"
-DATA_FILE = 'movies_test.json' # Test için ayrı bir dosya ismi verdim
-MAX_PAGES = 1 # DENEME İÇİN SADECE 1 SAYFA
+DATA_FILE = 'movies_test.json'
+MAX_PAGES = 1 # Deneme için 1, sonra 170 yapabilirsin Güneş.
 
 def get_soup(url):
     headers = {
@@ -24,111 +24,106 @@ def get_soup(url):
         return None
 
 def get_full_movie_details(url):
-    """Film detay sayfasına girer; iframe, puan, kategori ve özeti çeker."""
     soup = get_soup(url)
     details = {
         "videoUrl": url,
         "description": "Açıklama bulunamadı.",
         "imdb": "0.0",
         "genres": [],
-        "cast": []
+        "cast": [],
+        "year": ""
     }
     
     if not soup:
         return details
 
     try:
-        # 1. Video Iframe Yakalama
-        iframe = soup.find('iframe', id='iframe') or soup.find('iframe')
+        # 1. Video Iframe
+        iframe = soup.find('iframe')
         if iframe and 'src' in iframe.attrs:
-            src = iframe['src']
-            details["videoUrl"] = 'https:' + src if src.startswith('//') else src
+            details["videoUrl"] = iframe['src']
 
-        # 2. Film Özeti (Açıklama)
-        # Sitedeki yapıya göre farklı class isimlerini deniyoruz
-        desc_div = soup.find('div', class_='description') or soup.find('div', class_='wp-content') or soup.find('p', class_='storyline')
-        if desc_div:
-            details["description"] = desc_div.get_text(strip=True)
+        # 2. Film Özeti (H6 'Film Özeti' başlığından sonraki P etiketini alıyoruz)
+        summary_title = soup.find('h6', string='Film Özeti')
+        if summary_title:
+            summary_p = summary_title.find_next('p')
+            if summary_p:
+                details["description"] = summary_p.get_text(strip=True)
 
-        # 3. IMDB Puanı
-        imdb_element = soup.select_one('.imdb-rate, .imdb, .rating')
-        if imdb_element:
-            details["imdb"] = imdb_element.get_text(strip=True).replace("IMDb:", "").strip()
+        # 3. 'Tüm Veriler' kutusunu tarıyoruz
+        # Bu kutular içindeki span'lar başlığı, yanındaki div'ler değeri veriyor.
+        info_boxes = soup.find_all('div', class_=lambda x: x and 'rounded-[10px]' in x and 'bg-white/[4%]' in x)
+        
+        for box in info_boxes:
+            label_span = box.find('span', class_='text-xs')
+            if not label_span: continue
+            
+            label = label_span.get_text(strip=True)
+            value_div = label_span.find_next_sibling('div') or label_span.find_next_sibling('h6')
+            
+            if not value_div: continue
 
-        # 4. Kategoriler (Türler)
-        genre_links = soup.select('.categories a, .genres a, .genre a')
-        details["genres"] = list(set([g.get_text(strip=True) for g in genre_links])) # set() ile mükerrerleri sildik
-
-        # 5. Oyuncular
-        cast_links = soup.select('.cast a, .actors a, .actor a')
-        details["cast"] = [c.get_text(strip=True) for c in cast_links]
+            if "IMDB Puanı" in label:
+                details["imdb"] = value_div.get_text(strip=True)
+            elif "Tür" in label:
+                details["genres"] = [a.get_text(strip=True) for a in value_div.find_all('a')]
+            elif "Oyuncular" in label:
+                details["cast"] = [a.get_text(strip=True) for a in value_div.find_all('a')]
+            elif "Yapım Yılı" in label:
+                details["year"] = value_div.get_text(strip=True)
 
     except Exception as e:
-        print(f"⚠️ Detay çekme hatası ({url}): {e}", flush=True)
+        print(f"⚠️ Detay çekme hatası: {e}", flush=True)
 
     return details
 
 def start_scraping():
     all_films = []
-    print(f"🧪 TEST BAŞLADI: Sadece ilk sayfa ({BASE_DOMAIN}/filmler/page/1/) taranıyor...", flush=True)
+    print(f"🚀 Güneş TV için zengin veri toplama başlıyor...", flush=True)
 
-    for page_num in range(1, MAX_PAGES + 1):
-        target_url = f"{BASE_DOMAIN}/filmler/page/{page_num}/"
-        print(f"\n📄 Sayfa {page_num} taranıyor: {target_url}", flush=True)
-        
-        soup = get_soup(target_url)
-        if not soup: continue
+    soup = get_soup(f"{BASE_DOMAIN}/filmler/page/1/")
+    if not soup: return
 
-        items = soup.find_all('div', class_='post-item')
-        if not items:
-            print("🚫 Film öğeleri bulunamadı!", flush=True)
-            break
+    items = soup.find_all('div', class_='post-item')
+    print(f"📦 İlk sayfada {len(items)} film bulundu.", flush=True)
 
-        print(f"📦 Bu sayfada {len(items)} film bulundu. Detaylar toplanıyor...", flush=True)
+    for index, item in enumerate(items, 1):
+        try:
+            link_element = item.find('a')
+            if not link_element: continue
+            
+            title = link_element.get('title', '').strip()
+            movie_page_url = link_element.get('href', '')
+            
+            # Resim çekme
+            img_element = item.find('img')
+            image = img_element.get('data-src') or img_element.get('src') or ""
+            
+            print(f"   [{index}/{len(items)}] 🎬 {title} ... ", end="", flush=True)
+            
+            # Detayları çek
+            meta = get_full_movie_details(movie_page_url)
+            
+            all_films.append({
+                'title': title,
+                'image': image,
+                'imdb': meta["imdb"],
+                'year': meta["year"],
+                'genres': meta["genres"],
+                'cast': meta["cast"],
+                'description': meta["description"],
+                'videoUrl': meta["videoUrl"],
+                'sourceUrl': movie_page_url
+            })
+            print("✅ Veriler çekildi.", flush=True)
+            time.sleep(0.5)
+        except:
+            continue
 
-        for index, item in enumerate(items, 1):
-            try:
-                link_element = item.find('a')
-                if not link_element: continue
-                
-                title = link_element.get('title', '').strip()
-                movie_page_url = link_element.get('href', '')
-                
-                img_element = item.find('img')
-                image = ""
-                if img_element:
-                    image = img_element.get('data-src') or img_element.get('src') or ""
-                    if image.startswith('//'): image = 'https:' + image
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(all_films, f, ensure_ascii=False, indent=2)
 
-                if title and movie_page_url:
-                    print(f"   [{index}/{len(items)}] 🎬 {title} işleniyor... ", end="", flush=True)
-                    
-                    # Detay sayfasına gir
-                    movie_meta = get_full_movie_details(movie_page_url)
-                    
-                    all_films.append({
-                        'title': title,
-                        'image': image,
-                        'url': movie_page_url,
-                        'videoUrl': movie_meta["videoUrl"],
-                        'imdb': movie_meta["imdb"],
-                        'description': movie_meta["description"],
-                        'genres': movie_meta["genres"],
-                        'cast': movie_meta["cast"]
-                    })
-                    print("✅", flush=True)
-                    
-                    time.sleep(0.5) # Sunucuyu yormayalım
-                    
-            except Exception as e:
-                print(f"❌ Hata: {e}", flush=True)
-                continue
-
-        # Test dosyasını kaydet
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(all_films, f, ensure_ascii=False, indent=2)
-
-    print(f"\n🎉 Test bitti! 'movies_test.json' dosyasını kontrol edebilirsin.", flush=True)
+    print(f"\n🎉 İşlem tamam! 'movies_test.json' hazır Güneş.", flush=True)
 
 if __name__ == "__main__":
     start_scraping()
