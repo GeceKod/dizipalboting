@@ -31,7 +31,7 @@ jobs:
 
     - name: Botu Çalıştır
       # Sanal ekran (xvfb) ile çalıştırıyoruz
-      run: xvfb-run python original_main_dizi.py
+      run: xvfb-run --auto-servernum --server-args="-screen 0 1920x1080x24" python original_main_dizi.py
 
     - name: Kaydet ve Github'a Yükle
       run: |
