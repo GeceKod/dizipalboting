@@ -27,10 +27,8 @@ jobs:
     - name: Kutuphaneleri Yukle
       run: |
         python -m pip install --upgrade pip
-        # requirements.txt varsa ordan yükle
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-        # Garanti olsun diye cloudscraper ve diğerlerini manuel de tetikliyoruz
-        pip install requests beautifulsoup4 cloudscraper
+        # Yeni ve daha güçlü kütüphaneyi yüklüyoruz:
+        pip install curl_cffi beautifulsoup4 requests
 
     - name: Botu Calistir
       env:
