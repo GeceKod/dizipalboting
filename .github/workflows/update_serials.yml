@@ -55,8 +55,8 @@ jobs:
       run: |
         sudo apt-get update
         sudo apt-get install -y xvfb google-chrome-stable
-        pip install seleniumbase beautifulsoup4
-        # SeleniumBase için sürücüyü indir
+        # Hem SeleniumBase hem Curl_CFFI yüklüyoruz
+        pip install seleniumbase curl_cffi beautifulsoup4
         seleniumbase install chromedriver
 
 
