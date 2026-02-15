@@ -22,16 +22,21 @@ jobs:
     - name: Python Kurulumu
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9'
+        python-version: '3.9' # Cloudscraper için 3.9 veya 3.10 idealdir
 
     - name: Kutuphaneleri Yukle
       run: |
-        pip install -r requirements.txt
+        python -m pip install --upgrade pip
+        # requirements.txt varsa ordan yükle
+        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        # Garanti olsun diye cloudscraper ve diğerlerini manuel de tetikliyoruz
+        pip install requests beautifulsoup4 cloudscraper
 
     - name: Botu Calistir
       env:
-        # Site adresi değişirse buradan veya Secrets kısmından güncelleyebilirsin
-        SITE_URL: ${{ secrets.SITE_URL || 'https://dizipal.cx/diziler' }}
+        # Site adresi değişirse buradan güncelleyebilirsin
+        SITE_URL: 'https://dizipal.cx/diziler'
+      # NOT: Dosya adının main2.py olduğundan emin ol (son verdiğim kodun adı)
       run: python main2.py
 
     - name: Degisiklikleri Kaydet ve Yukle
@@ -43,10 +48,9 @@ jobs:
         git add .
         
         # 2. Değişiklik varsa commit yap, yoksa devam et
-        git commit -m "Otomatik guncelleme" || echo "Degisiklik yok"
+        git commit -m "Otomatik guncelleme: $(date)" || echo "Degisiklik yok"
         
         # 3. KRİTİK NOKTA: Sitede sen bir şey değiştirdiysen önce onu indir ve birleştir
-        # Bu komut 'failed to push' hatasını %100 çözer
         git pull --rebase origin main
         
         # 4. Şimdi güvenle yükle
