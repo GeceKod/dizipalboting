@@ -7,8 +7,7 @@ from urllib.parse import urljoin
 
 # --- AYARLAR ---
 BASE_DOMAIN = "https://dizipal.cx"
-BASE_URL = "https://dizipal.cx/diziler/page/{}/" 
-DATA_FILE = 'diziler.json'  # Dosya ismi standart yapıldı
+DATA_FILE = 'diziler.json'
 MAX_RETRIES = 3
 
 HEADERS = {
@@ -17,16 +16,19 @@ HEADERS = {
 }
 
 def get_soup(url, retry_count=0):
-    """Verilen URL'e istek atıp BeautifulSoup objesi döner."""
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        # verify=False SSL hatasını önler
+        response = requests.get(url, headers=HEADERS, timeout=20, verify=False)
         if response.status_code == 200:
             return BeautifulSoup(response.content, 'html.parser')
         elif response.status_code == 404:
             return "404"
+        else:
+            print(f"      ⚠️ Erişim kodu: {response.status_code}")
+            return None
     except Exception as e:
         if retry_count < MAX_RETRIES:
-            time.sleep(2)
+            time.sleep(3)
             return get_soup(url, retry_count + 1)
     return None
 
@@ -37,14 +39,12 @@ def get_video_source(episode_url):
         return ""
     
     try:
-        # 1. Yöntem: video-player-area
         player_area = soup.find('div', class_='video-player-area')
         if player_area:
             iframe = player_area.find('iframe')
             if iframe:
                 return iframe.get('src')
         
-        # 2. Yöntem: Genel Iframe taraması (Yedek)
         iframes = soup.find_all('iframe')
         for frame in iframes:
             src = frame.get('src', '')
@@ -55,7 +55,6 @@ def get_video_source(episode_url):
     return ""
 
 def get_episodes_from_page(soup):
-    """Bir sayfa (sezon) içindeki bölümleri parse eder."""
     episodes = []
     episode_items = soup.find_all('div', class_='episode-item')
     
@@ -72,9 +71,8 @@ def get_episodes_from_page(soup):
             if img_tag:
                 ep_data['thumbnail'] = img_tag.get('src')
             
-            # Video kaynağını çek
             if ep_url:
-                # Video kaynağını çekmek için bölüm detayına git
+                # Video kaynağı
                 video_src = get_video_source(ep_url)
                 ep_data['video_source'] = video_src
                 print(f"      ✅ {ep_data.get('title', 'Bölüm')} -> Kaynak Alındı", flush=True)
@@ -105,7 +103,6 @@ def get_full_series_details(url):
     }
     
     try:
-        # --- Metadata ---
         h1 = soup.find('h1')
         if h1:
             full_text = h1.get_text(" ", strip=True)
@@ -147,7 +144,6 @@ def get_full_series_details(url):
                 if full_link not in season_links:
                     season_links.append(full_link)
         
-        # Eğer dropdown yoksa tek sezon vardır, mevcut sayfayı ekle
         if not season_links:
             season_links.append(url)
         
@@ -155,8 +151,6 @@ def get_full_series_details(url):
 
         for s_idx, season_url in enumerate(season_links):
             print(f"      📌 Sezon {s_idx+1} taranıyor...", flush=True)
-            
-            # İlk sayfa zaten elimizde (soup), tekrar istek atmayalım
             if season_url == url:
                 current_season_soup = soup
             else:
@@ -167,29 +161,43 @@ def get_full_series_details(url):
                 meta['episodes'].extend(season_episodes)
 
     except Exception as e:
-        print(f"   ❌ Hata oluştu: {e}")
+        print(f"   ❌ Hata: {e}")
 
     return meta
 
 def main():
-    print("🚀 TEST BAŞLIYOR: Sadece 1. sayfa taranacak...")
+    # SSL uyarılarını gizle
+    requests.packages.urllib3.disable_warnings()
+    print("🚀 DİZİPAL TARAYICI BAŞLATILIYOR...")
     
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            all_series = json.load(f)
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                all_series = json.load(f)
+            print(f"📦 Mevcut veri yüklendi: {len(all_series)} dizi.")
+        except:
+            all_series = []
     else:
         all_series = []
 
     page_num = 1
-    
-    # --- SADECE 1. SAYFA KONTROLÜ ---
-    while page_num <= 1: 
-        list_url = BASE_URL.format(page_num)
+    consecutive_empty = 0
+
+    while True:
+        # --- URL DÜZELTMESİ ---
+        # 1. Sayfa: /diziler/
+        # 2+ Sayfa: /diziler/page/X/
+        if page_num == 1:
+            list_url = "https://dizipal.cx/diziler/"
+        else:
+            list_url = f"https://dizipal.cx/diziler/page/{page_num}/"
+            
         print(f"\n📄 Sayfa {page_num} taranıyor: {list_url}")
         
         soup = get_soup(list_url)
+        
         if not soup or soup == "404":
-            print("🏁 Sayfa bulunamadı.")
+            print("🏁 Sayfa bulunamadı (404). Tarama bitti.")
             break
         
         links = soup.find_all('a', href=True)
@@ -207,12 +215,17 @@ def main():
         
         if not series_urls:
             print("⚠️ Bu sayfada dizi bulunamadı.")
-            break
-
-        print(f"   🔍 Bu sayfada {len(series_urls)} dizi bulundu. İşleniyor...")
+            consecutive_empty += 1
+            if consecutive_empty >= 2:
+                print("🏁 Üst üste boş sayfa. Bitti.")
+                break
+            page_num += 1
+            continue
+        
+        consecutive_empty = 0
+        print(f"   🔍 {len(series_urls)} dizi bulundu.")
 
         for s_url in series_urls:
-            # Daha önce eklenmişse atla
             if any(s['url'] == s_url for s in all_series):
                 print(f"   ⏭️ Zaten var: {s_url}")
                 continue
@@ -220,13 +233,12 @@ def main():
             details = get_full_series_details(s_url)
             if details:
                 all_series.append(details)
-                # Her dizi bitiminde kaydet
                 with open(DATA_FILE, 'w', encoding='utf-8') as f:
                     json.dump(all_series, f, ensure_ascii=False, indent=2)
 
         page_num += 1
 
-    print(f"\n✅ İŞLEM TAMAMLANDI. Veriler '{DATA_FILE}' dosyasına kaydedildi.")
+    print(f"\n✅ TAMAMLANDI. Toplam {len(all_series)} dizi kaydedildi.")
 
 if __name__ == "__main__":
     main()
