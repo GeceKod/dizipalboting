@@ -18,25 +18,22 @@ session = requests.Session()
 def get_cookies_and_ua_with_selenium():
     """
     Selenium ile Cloudflare'i geçmeye çalışır.
-    Yöntem: Klavye (TAB + SPACE) simülasyonu.
+    Yöntem: Klavye (TAB + SPACE) simülasyonu (DÜZELTİLMİŞ).
     """
     print(f"🔓 Selenium Başlatılıyor: {BASE_DOMAIN} ...", flush=True)
     cookies = {}
     user_agent = ""
     
-    # agent: Kullanıcı ajanı (User Agent) değiştirerek Linux izini gizlemeye çalışıyoruz
+    # agent: Linux olduğu anlaşılmasın diye Windows User-Agent kullanıyoruz
     with SB(uc=True, headless=False, agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36") as sb:
         try:
             # Reconnect ile aç (İzleri temizler)
-            sb.uc_open_with_reconnect(BASE_DOMAIN + "/diziler/", reconnect_time=5)
+            sb.uc_open_with_reconnect(BASE_DOMAIN + "/diziler/", reconnect_time=6)
             
             print("   ⏳ Sayfa yüklendi, Cloudflare kontrol ediliyor...", flush=True)
             time.sleep(5)
             
             # --- KLAVYE İLE GEÇİŞ DENEMESİ ---
-            # Cloudflare kutusu bazen fare tıklamasını algılamaz. 
-            # TAB tuşuyla kutuyu seçip BOŞLUK tuşuna basmayı deneyeceğiz.
-            
             for i in range(3): # 3 tur dene
                 title = sb.get_title()
                 if "Attention" not in title and "Just a moment" not in title:
@@ -45,21 +42,23 @@ def get_cookies_and_ua_with_selenium():
                 
                 print(f"   🤖 Engel Algılandı! Klavye hilesi deneniyor... (Tur {i+1})", flush=True)
                 
-                # Sayfaya tıkla (odağı al)
+                # Sayfanın gövdesine odaklan
                 sb.click("body") 
+                time.sleep(0.5)
                 
                 # 5 Kere TAB tuşuna bas (Kutucuğa gelmek için)
+                # DÜZELTME: "body" seçicisi eklendi
                 for _ in range(5):
-                    sb.press_keys("\t") # TAB tuşu
-                    time.sleep(0.3)
+                    sb.press_keys("body", "\t") 
+                    time.sleep(0.2)
                 
-                # Şimdi SPACE (Boşluk) ve ENTER tuşlarına bas
-                sb.press_keys(" ") # Boşluk (Checkbox işaretler)
-                time.sleep(1)
-                sb.press_keys("\n") # Enter
+                # Şimdi SPACE (Boşluk) tuşuna bas
+                print("   👆 SPACE tuşuna basılıyor...", flush=True)
+                sb.press_keys("body", " ") 
+                time.sleep(2)
                 
                 # Bekle ve kontrol et
-                time.sleep(6)
+                time.sleep(5)
             
             # Son Kontrol
             title = sb.get_title()
@@ -67,8 +66,6 @@ def get_cookies_and_ua_with_selenium():
             
             if "Attention" in title or "Just a moment" in title:
                 print("   ❌ Cloudflare GEÇİLEMEDİ! IP adresi bloklanmış olabilir.", flush=True)
-                # Sayfa kaynağını kaydet (Hata ayıklama için - Opsiyonel)
-                # sb.save_page_source("cloudflare_error.html")
                 return None, None
             
             # Başarılı ise verileri al
@@ -114,6 +111,7 @@ def get_video_source(soup):
         for frame in iframes:
             src = frame.get('src', '')
             fid = frame.get('id', '')
+            # Reklam filtreleri
             if 'psContainer' in fid or 'google' in src: continue
             if 'embed' in src or '.cfd' in src or 'player' in src or 'get_video' in src: return src
     except: pass
@@ -192,13 +190,11 @@ def get_full_series_details(url, cookies, user_agent, existing_episodes_list=[])
     return meta
 
 def main():
-    print("🛡️ Dizipal 1538 V3 (Klavye Modu)...", flush=True)
+    print("🛡️ Dizipal 1538 V3 (Klavye Modu - DÜZELTİLDİ)...", flush=True)
     cookies, user_agent = get_cookies_and_ua_with_selenium()
     
     if not cookies:
         print("❌ Çerez YOK! (GitHub IP'si bloklanmış olabilir)", flush=True)
-        # Eğer Github Actions'da çalışmıyorsa lokalde çalıştırın uyarısı:
-        print("💡 İPUCU: Bu kodu kendi bilgisayarınızda çalıştırırsanız %100 çalışacaktır.", flush=True)
         return
 
     if os.path.exists(DATA_FILE):
