@@ -1,124 +1,249 @@
-import requests
+from seleniumbase import SB
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 import json
 import time
 import os
+import random
+from urllib.parse import urljoin
 
 # --- AYARLAR ---
 BASE_DOMAIN = "https://dizipal.cx"
 DATA_FILE = 'movies.json'
-MAX_RETRIES = 3 # Bir sayfa hata verirse kaç kez denenecek
-FAILED_THRESHOLD = 3 # Üst üste kaç sayfa hata verirse duracak
 
-def get_soup(url, retry_count=0):
+# Global Session nesnesi (Hız için)
+session = requests.Session()
+
+def get_cookies_and_ua_with_selenium():
+    """Selenium ile siteye girip Cloudflare çerezlerini ve User-Agent'ı alır."""
+    print("🔓 Selenium ile Cloudflare kilidi açılıyor (Filmler)...")
+    cookies = {}
+    user_agent = ""
+    
+    with SB(uc=True, headless=False) as sb:
+        try:
+            # Filmler sayfasına gidiyoruz
+            sb.open(BASE_DOMAIN + "/filmler/")
+            time.sleep(6) # Cloudflare kontrolü için bekleme
+            
+            title = sb.get_title()
+            print(f"   🔓 Site Başlığı: {title}")
+            
+            user_agent = sb.get_user_agent()
+            sb_cookies = sb.get_cookies()
+            for cookie in sb_cookies:
+                cookies[cookie['name']] = cookie['value']
+                
+            print("   ✅ Giriş kartı (Cookies) alındı!")
+            
+        except Exception as e:
+            print(f"   ❌ Selenium hatası: {e}")
+            
+    return cookies, user_agent
+
+def get_soup_fast(url, cookies, user_agent):
+    """Curl_CFFI ile hızlı istek atar (Chrome taklidi yaparak)."""
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': f'{BASE_DOMAIN}/',
+        'User-Agent': user_agent,
+        'Referer': BASE_DOMAIN,
     }
     try:
-        response = requests.get(url, headers=headers, timeout=20)
+        response = session.get(
+            url, 
+            cookies=cookies, 
+            headers=headers, 
+            impersonate="chrome110", 
+            timeout=15
+        )
+        
         if response.status_code == 200:
             return BeautifulSoup(response.content, 'html.parser')
         elif response.status_code == 404:
-            return "404" # Sayfa gerçekten yok
-        else:
-            raise Exception(f"Status Code: {response.status_code}")
+            return "404"
+        elif response.status_code == 403:
+            print("   ⚠️ Hızlı mod 403 yedi (Çerez yenilenmeli).")
+            return "403"
     except Exception as e:
-        if retry_count < MAX_RETRIES:
-            print(f"   ⚠️ Hata: {url}. {retry_count+1}. deneme yapılıyor...", flush=True)
-            time.sleep(2)
-            return get_soup(url, retry_count + 1)
+        print(f"   ⚠️ Hızlı mod hatası: {e}")
+    return None
+
+def get_video_source(soup):
+    """Video kaynağını (iframe) bulur."""
+    try:
+        # 1. Yöntem: Güvenli alan
+        player_area = soup.find('div', class_='video-player-area')
+        if player_area:
+            iframe = player_area.find('iframe')
+            if iframe: return iframe.get('src')
+        
+        # 2. Yöntem: Genel arama (Senin eski kodundaki yöntem)
+        iframe = soup.find('iframe')
+        if iframe and 'src' in iframe.attrs:
+            return iframe['src']
+            
+        # 3. Yöntem: Tüm iframeler
+        iframes = soup.find_all('iframe')
+        for frame in iframes:
+            src = frame.get('src', '')
+            if 'embed' in src or '.cfd' in src or 'player' in src:
+                return src
+    except: pass
+    return ""
+
+def get_full_movie_details(url, cookies, user_agent):
+    soup = get_soup_fast(url, cookies, user_agent)
+    
+    # Standart boş şablon
+    details = {
+        "url": url,
+        "videoUrl": "", 
+        "description": "Açıklama bulunamadı.", 
+        "imdb": "0.0", 
+        "genres": [], 
+        "cast": [], 
+        "year": "",
+        "poster": "",
+        "cover_image": ""
+    }
+    
+    if not soup or soup == "404" or soup == "403": 
         return None
 
-def get_full_movie_details(url):
-    soup = get_soup(url)
-    details = {"videoUrl": url, "description": "Açıklama bulunamadı.", "imdb": "0.0", "genres": [], "cast": [], "year": ""}
-    if not soup or soup == "404": return details
     try:
-        iframe = soup.find('iframe')
-        if iframe and 'src' in iframe.attrs: details["videoUrl"] = iframe['src']
-        summary_title = soup.find('h6', string='Film Özeti')
+        # --- Metadata (Poster, Kapak vs) ---
+        poster_div = soup.find('div', class_='poster')
+        if poster_div and poster_div.find('img'):
+            details['poster'] = poster_div.find('img').get('src')
+
+        head_div = soup.find('div', id='head', class_='cover-image')
+        if head_div and head_div.has_attr('style') and "url('" in head_div['style']:
+            details['cover_image'] = head_div['style'].split("url('")[1].split("')")[0]
+
+        # --- Video Kaynağı ---
+        details["videoUrl"] = get_video_source(soup)
+
+        # --- Açıklama ---
+        # Senin kodundaki mantık: Film Özeti başlığını bul, sonraki p'yi al
+        summary_title = soup.find('h6', string=lambda t: t and 'Film Özeti' in t)
         if summary_title:
             summary_p = summary_title.find_next('p')
             if summary_p: details["description"] = summary_p.get_text(strip=True)
-        # Detay kutularını çekme...
+        else:
+            # Alternatif: summary-text class'ı
+            summ = soup.find('p', class_='summary-text')
+            if summ: details["description"] = summ.get_text(strip=True)
+
+        # --- Detay Kutuları (Senin kodundaki mantık) ---
         info_boxes = soup.find_all('div', class_=lambda x: x and 'rounded-[10px]' in x and 'bg-white/[4%]' in x)
+        
         for box in info_boxes:
             label_span = box.find('span', class_='text-xs')
             if label_span:
                 label = label_span.get_text(strip=True)
                 val_div = label_span.find_next_sibling('div') or label_span.find_next_sibling('h6')
+                
                 if val_div:
-                    if "IMDB Puanı" in label: details["imdb"] = val_div.get_text(strip=True)
-                    elif "Tür" in label: details["genres"] = [a.get_text(strip=True) for a in val_div.find_all('a')]
-                    elif "Oyuncular" in label: details["cast"] = [a.get_text(strip=True) for a in val_div.find_all('a')]
-                    elif "Yapım Yılı" in label: details["year"] = val_div.get_text(strip=True)
-    except: pass
+                    if "IMDB Puanı" in label: 
+                        details["imdb"] = val_div.get_text(strip=True)
+                    elif "Tür" in label: 
+                        details["genres"] = [a.get_text(strip=True) for a in val_div.find_all('a')]
+                    elif "Oyuncular" in label: 
+                        details["cast"] = [a.get_text(strip=True) for a in val_div.find_all('a')]
+                    elif "Yapım Yılı" in label: 
+                        details["year"] = val_div.get_text(strip=True)
+
+    except Exception as e: 
+        print(f"   ⚠️ Detay hatası: {e}")
+        pass
+        
     return details
 
-def start_scraping():
-    all_films = []
-    page_num = 1
-    consecutive_failed_pages = 0
+def main():
+    print("🛡️ Güneş TV: Film Botu Başlatılıyor (Hibrit Mod)...")
+
+    # 1. ADIM: Selenium ile Çerezleri Al
+    cookies, user_agent = get_cookies_and_ua_with_selenium()
     
-    print(f"🛡️ Güneş TV: Yüksek Toleranslı Tarama Başlatıldı...", flush=True)
+    if not cookies:
+        print("❌ Çerezler alınamadı.")
+        return
 
-    while consecutive_failed_pages < FAILED_THRESHOLD:
+    # 2. ADIM: Hızlı Tarama
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                all_films = json.load(f)
+            print(f"📦 Mevcut veri: {len(all_films)} film.")
+        except:
+            all_films = []
+    else:
+        all_films = []
+
+    page_num = 1
+    empty_page_count = 0
+
+    while True:
         target_url = f"{BASE_DOMAIN}/filmler/page/{page_num}/"
-        print(f"\n--- 📄 SAYFA {page_num} ANALİZİ ---", flush=True)
+        print(f"\n--- 📄 SAYFA {page_num} ANALİZİ: {target_url} ---")
         
-        soup = get_soup(target_url)
+        soup = get_soup_fast(target_url, cookies, user_agent)
         
-        if soup is None or soup == "404":
-            consecutive_failed_pages += 1
-            print(f"   ❌ Sayfa alınamadı ({consecutive_failed_pages}/{FAILED_THRESHOLD})", flush=True)
-            page_num += 1
-            continue
+        # Çerez yenileme kontrolü
+        if soup == "403":
+            print("🔄 Çerez süresi doldu, yenileniyor...")
+            cookies, user_agent = get_cookies_and_ua_with_selenium()
+            soup = get_soup_fast(target_url, cookies, user_agent)
 
-        # Eğer buraya geldiysek sayfa başarılıdır, hata sayacını sıfırla
-        consecutive_failed_pages = 0
+        if not soup or soup == "404":
+            print("🏁 Sayfa yok veya bitti.")
+            break
+
+        # Filmleri Bul (post-item class'ı)
         items = soup.find_all('div', class_='post-item')
         
         if not items:
-            print("   🚫 Film listesi boş. Arşiv bitti.", flush=True)
-            break
+            print("⚠️ Bu sayfada film bulunamadı.")
+            empty_page_count += 1
+            if empty_page_count >= 2: break
+            page_num += 1
+            continue
 
-        print(f"   📦 {len(items)} film bulundu.", flush=True)
+        empty_page_count = 0
+        print(f"   🔍 {len(items)} film bulundu.")
 
         for item in items:
             try:
                 link_element = item.find('a')
                 if not link_element: continue
+                
                 title = link_element.get('title', '').strip()
                 movie_url = link_element.get('href', '')
-                img_element = item.find('img')
-                image = img_element.get('data-src') or img_element.get('src') or ""
                 
-                meta = get_full_movie_details(movie_url)
-                all_films.append({
-                    'title': title, 'image': image, 'imdb': meta["imdb"], 
-                    'year': meta["year"], 'genres': meta["genres"], 
-                    'cast': meta["cast"], 'description': meta["description"], 
-                    'videoUrl': meta["videoUrl"]
-                })
-                print(f"   ✅ [{len(all_films)}] {title}", flush=True)
-            except: continue
+                # Zaten var mı kontrolü
+                if any(f['url'] == movie_url for f in all_films if 'url' in f):
+                    print(f"   ⏭️ Zaten var: {title}")
+                    continue
 
-        # Sayfanın en altında "Next/Sonraki" butonu var mı kontrolü
-        # Bu, sona geldiğimizi anlamanın en kesin yoludur.
-        pagination = soup.find('div', class_='pagination') or soup.find('div', class_='nav-links')
-        if pagination:
-            next_button = pagination.find('a', class_=lambda x: x and ('next' in x or 'next-page' in x))
-            if not next_button and page_num > 5: # İlk sayfalarda değilsek ve next yoksa bitmiştir
-                print("   🏁 Sonraki sayfa butonu bulunamadı. Arşiv tamamlandı.", flush=True)
-                # break # İstersen burada da kırabilirsin ama ardışık hata kontrolü daha garanti.
+                # Detayları çek
+                meta = get_full_movie_details(movie_url, cookies, user_agent)
+                
+                if meta:
+                    meta['title'] = title # Listeden gelen başlığı kullan
+                    all_films.append(meta)
+                    
+                    # Anlık Kayıt
+                    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(all_films, f, ensure_ascii=False, indent=2)
+                    
+                    print(f"   ✅ Eklendi: {title}")
+                
+            except Exception as e: 
+                print(f"   ❌ Film işleme hatası: {e}")
+                continue
 
-        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(all_films, f, ensure_ascii=False, indent=2)
-        
         page_num += 1
 
-    print(f"\n🎉 İşlem tamamlandı. Toplam veri: {len(all_films)}", flush=True)
+    print(f"\n🎉 İşlem tamamlandı. Toplam veri: {len(all_films)}")
 
 if __name__ == "__main__":
-    start_scraping()
+    main()
