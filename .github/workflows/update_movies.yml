@@ -26,7 +26,11 @@ jobs:
 
     - name: Kutuphaneleri Yukle
       run: |
-        pip install -r requirements.txt
+        sudo apt-get update
+        sudo apt-get install -y xvfb google-chrome-stable
+        # Hem SeleniumBase hem Curl_CFFI yüklüyoruz
+        pip install seleniumbase curl_cffi beautifulsoup4
+        seleniumbase install chromedriver
 
     - name: Botu Calistir
       env:
