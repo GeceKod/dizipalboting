@@ -1,115 +1,71 @@
-from curl_cffi import requests # cloudscraper yerine bu güçlü kütüphaneyi kullanıyoruz
+from seleniumbase import SB
 from bs4 import BeautifulSoup
 import json
 import time
 import os
-from urllib.parse import urljoin
 import random
+from urllib.parse import urljoin
 
 # --- AYARLAR ---
 BASE_DOMAIN = "https://dizipal.cx"
 DATA_FILE = 'diziler.json'
-MAX_RETRIES = 3
 
-def get_soup(url, retry_count=0):
-    """URL'e istek atıp BeautifulSoup objesi döner."""
+def get_video_source(sb, episode_url):
+    """Bölüm sayfasına girip iframe src'yi alır."""
     try:
-        # impersonate="chrome110" -> Siteye "Ben Chrome 110 sürümüyüm" der ve TLS parmak izini taklit eder.
-        response = requests.get(url, impersonate="chrome110", timeout=30)
+        sb.open(episode_url)
+        # Sayfanın yüklenmesini bekle (Video player div'i görünene kadar)
+        try:
+            sb.wait_for_element('div.video-player-area', timeout=5)
+        except:
+            pass # Bulamazsa devam et
         
-        if response.status_code == 200:
-            return BeautifulSoup(response.content, 'html.parser')
-        elif response.status_code == 404:
-            return "404"
-        elif response.status_code == 403:
-            print(f"      ⚠️ Erişim Engellendi (403). Bekleniyor...")
-            time.sleep(10) # 403 alınca biraz daha uzun bekle
-            if retry_count < 2: # Şansımızı biraz daha zorlayalım
-                return get_soup(url, retry_count + 1)
-            return None
-        else:
-            print(f"      ⚠️ Hata Kodu: {response.status_code}")
-            return None
-            
-    except Exception as e:
-        if retry_count < MAX_RETRIES:
-            wait_time = random.uniform(3, 7)
-            print(f"      ⏳ Hata oluştu, tekrar deneniyor... ({retry_count+1})")
-            time.sleep(wait_time)
-            return get_soup(url, retry_count + 1)
-    return None
-
-def get_video_source(episode_url):
-    """Bölüm iframe kaynağını çeker."""
-    soup = get_soup(episode_url)
-    if not soup or soup == "404":
-        return ""
-    
-    try:
+        soup = BeautifulSoup(sb.get_page_source(), 'html.parser')
+        
+        # Yöntem 1: Player alanı
         player_area = soup.find('div', class_='video-player-area')
         if player_area:
             iframe = player_area.find('iframe')
             if iframe:
                 return iframe.get('src')
         
+        # Yöntem 2: Genel Iframe
         iframes = soup.find_all('iframe')
         for frame in iframes:
             src = frame.get('src', '')
             if 'embed' in src or '.cfd' in src or 'player' in src:
                 return src
-    except:
-        pass
+    except Exception as e:
+        print(f"      ⚠️ Video kaynağı alınamadı: {e}")
     return ""
 
-def get_episodes_from_page(soup):
-    episodes = []
-    episode_items = soup.find_all('div', class_='episode-item')
-    
-    for item in episode_items:
-        ep_data = {}
-        link_tag = item.find('a')
-        
-        if link_tag:
-            ep_url = link_tag.get('href')
-            ep_data['url'] = ep_url
-            ep_data['title'] = link_tag.get('title')
-            
-            img_tag = link_tag.find('img')
-            if img_tag:
-                ep_data['thumbnail'] = img_tag.get('src')
-            
-            if ep_url:
-                video_src = get_video_source(ep_url)
-                ep_data['video_source'] = video_src
-                print(f"      ✅ {ep_data.get('title', 'Bölüm')} -> Kaynak Alındı", flush=True)
-                time.sleep(0.5)
-
-        num_tag = item.find('h4', class_='font-eudoxus')
-        if num_tag:
-            ep_data['episode_number'] = num_tag.get_text(strip=True)
-        
-        episodes.append(ep_data)
-    return episodes
-
-def get_full_series_details(url):
+def get_full_series_details(sb, url):
     print(f"   ▶️ Dizi Analiz ediliyor: {url}")
-    soup = get_soup(url)
-    if not soup or soup == "404":
-        return None
-    
-    meta = {
-        "url": url,
-        "title": "",
-        "year": "",
-        "description": "",
-        "poster": "",
-        "cover_image": "",
-        "imdb": "0",
-        "genres": [],
-        "episodes": []
-    }
     
     try:
+        sb.open(url)
+        # Cloudflare kontrolü varsa geçmesini bekle
+        time.sleep(random.uniform(2, 4)) 
+        
+        soup = BeautifulSoup(sb.get_page_source(), 'html.parser')
+        
+        # Eğer sayfa boş veya 404 ise
+        if "Sayfa bulunamadı" in soup.text or sb.get_title() == "404 Not Found":
+            return None
+
+        meta = {
+            "url": url,
+            "title": "",
+            "year": "",
+            "description": "",
+            "poster": "",
+            "cover_image": "",
+            "imdb": "0",
+            "genres": [],
+            "episodes": []
+        }
+
+        # Metadata Çekme İşlemleri
         h1 = soup.find('h1')
         if h1:
             full_text = h1.get_text(" ", strip=True)
@@ -156,91 +112,141 @@ def get_full_series_details(url):
         
         print(f"   📂 {len(season_links)} Sezon bulundu.", flush=True)
 
+        # Sezonları Gez
         for s_idx, season_url in enumerate(season_links):
             print(f"      📌 Sezon {s_idx+1} taranıyor...", flush=True)
-            if season_url == url:
-                current_season_soup = soup
-            else:
-                current_season_soup = get_soup(season_url)
-                time.sleep(1)
             
-            if current_season_soup and current_season_soup != "404":
-                season_episodes = get_episodes_from_page(current_season_soup)
-                meta['episodes'].extend(season_episodes)
+            # Eğer zaten o sayfadaysak tekrar yükleme
+            if season_url != sb.get_current_url():
+                sb.open(season_url)
+                time.sleep(2)
+            
+            season_soup = BeautifulSoup(sb.get_page_source(), 'html.parser')
+            episode_items = season_soup.find_all('div', class_='episode-item')
+            
+            for item in episode_items:
+                ep_data = {}
+                link_tag = item.find('a')
+                
+                if link_tag:
+                    ep_url = link_tag.get('href')
+                    ep_data['url'] = ep_url
+                    ep_data['title'] = link_tag.get('title')
+                    
+                    img_tag = link_tag.find('img')
+                    if img_tag:
+                        ep_data['thumbnail'] = img_tag.get('src')
+                    
+                    if ep_url:
+                        # Video için yeni sekmeye gerek yok, mevcut sayfada git-gel yapacağız
+                        # Veya basitçe URL'yi ziyaret edeceğiz.
+                        # NOT: Her bölüme girmek çok zaman alacağı için burada dikkatli olunmalı.
+                        # Hız için şimdilik ana sayfaya dönme mantığını kurgulamalıyız.
+                        pass 
+
+                num_tag = item.find('h4', class_='font-eudoxus')
+                if num_tag:
+                    ep_data['episode_number'] = num_tag.get_text(strip=True)
+                
+                meta['episodes'].append(ep_data)
+
+        # NOT: Video kaynaklarını toplamak için bölümleri tek tek gezmek gerek
+        # Bu işlem Selenium ile ÇOK UZUN sürer (Her bölüm 5-10 saniye). 
+        # O yüzden şimdilik sadece bölüm listesini alıyoruz.
+        # Eğer video player'ı MUTLAKA istiyorsanız aşağıyı açın:
+        
+        print(f"      🎥 Bölüm playerları taranıyor ({len(meta['episodes'])} bölüm)...")
+        for ep in meta['episodes']:
+            if 'url' in ep:
+                 src = get_video_source(sb, ep['url'])
+                 ep['video_source'] = src
+                 print(f"         -> {ep.get('title')} : {src}", flush=True)
+
+        return meta
 
     except Exception as e:
         print(f"   ❌ Hata: {e}")
-
-    return meta
+        return None
 
 def main():
-    print("🚀 DİZİPAL TARAYICI BAŞLATILIYOR (Curl_CFFI Modu)...")
+    print("🚀 DİZİPAL TARAYICI (SeleniumBase UC Modu)...")
     
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 all_series = json.load(f)
-            print(f"📦 Mevcut veri yüklendi: {len(all_series)} dizi.")
+            print(f"📦 Mevcut veri: {len(all_series)} dizi.")
         except:
             all_series = []
     else:
         all_series = []
 
-    page_num = 1
-    empty_page_count = 0 
+    # UC=True -> Undetected Chromedriver (Bot korumasını aşar)
+    # Headless=False -> Xvfb ile sanal ekranda "görünür" çalışır (Daha güvenli)
+    with SB(uc=True, headless=False) as sb:
+        page_num = 1
+        empty_page_count = 0 
 
-    while True: 
-        if page_num == 1:
-            list_url = "https://dizipal.cx/diziler/"
-        else:
-            list_url = f"https://dizipal.cx/diziler/page/{page_num}/"
+        while True:
+            if page_num == 1:
+                list_url = "https://dizipal.cx/diziler/"
+            else:
+                list_url = f"https://dizipal.cx/diziler/page/{page_num}/"
+                
+            print(f"\n📄 Sayfa {page_num} açılıyor: {list_url}")
             
-        print(f"\n📄 Sayfa {page_num} taranıyor: {list_url}")
-        
-        soup = get_soup(list_url)
-        
-        if not soup or soup == "404":
-            print("🏁 Sayfa bitti veya engellendi.")
-            break
-        
-        links = soup.find_all('a', href=True)
-        series_urls = []
-        for link in links:
-            href = link['href']
-            if '/dizi/' in href and href.count('/') > 3:
-                full_url = urljoin(BASE_DOMAIN, href)
-                clean_url = full_url.split('?')[0]
-                if clean_url not in series_urls:
-                    series_urls.append(clean_url)
+            try:
+                sb.open(list_url)
+                # Cloudflare "Human Verify" çıkarsa bekle
+                time.sleep(3) 
+                
+                # Sayfa kaynağını al
+                soup = BeautifulSoup(sb.get_page_source(), 'html.parser')
+                
+                # 404 Kontrolü
+                if "Sayfa bulunamadı" in soup.text or sb.get_title() == "404 Not Found":
+                    print("🏁 Sayfa yok. Bitti.")
+                    break
 
-        series_urls = list(set(series_urls))
-        
-        if not series_urls:
-            print("⚠️ Dizi bulunamadı.")
-            empty_page_count += 1
-            if empty_page_count >= 2:
-                print("🏁 Bitti.")
-                break
+                links = soup.find_all('a', href=True)
+                series_urls = []
+                for link in links:
+                    href = link['href']
+                    if '/dizi/' in href and href.count('/') > 3:
+                        full_url = urljoin(BASE_DOMAIN, href)
+                        clean_url = full_url.split('?')[0]
+                        if clean_url not in series_urls:
+                            series_urls.append(clean_url)
+                
+                series_urls = list(set(series_urls))
+                
+                if not series_urls:
+                    print("⚠️ Dizi bulunamadı.")
+                    empty_page_count += 1
+                    if empty_page_count >= 2:
+                        break
+                    page_num += 1
+                    continue
+                
+                empty_page_count = 0
+                print(f"   🔍 {len(series_urls)} dizi bulundu.")
+
+                for s_url in series_urls:
+                    if any(s['url'] == s_url for s in all_series):
+                        print(f"   ⏭️ Zaten var: {s_url}")
+                        continue
+                    
+                    details = get_full_series_details(sb, s_url)
+                    if details:
+                        all_series.append(details)
+                        with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                            json.dump(all_series, f, ensure_ascii=False, indent=2)
+
+            except Exception as e:
+                print(f"⚠️ Sayfa hatası: {e}")
+                # Hata alınca devam etmeye çalış
+                
             page_num += 1
-            continue
-        
-        empty_page_count = 0
-        print(f"   🔍 {len(series_urls)} dizi bulundu.")
-
-        for s_url in series_urls:
-            if any(s['url'] == s_url for s in all_series):
-                print(f"   ⏭️ Zaten var: {s_url}")
-                continue
-            
-            details = get_full_series_details(s_url)
-            if details:
-                all_series.append(details)
-                with open(DATA_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(all_series, f, ensure_ascii=False, indent=2)
-            
-            time.sleep(2)
-
-        page_num += 1
 
     print(f"\n✅ TAMAMLANDI. {len(all_series)} dizi kaydedildi.")
 
