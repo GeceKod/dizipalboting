@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 # --- AYARLAR ---
 BASE_DOMAIN = "https://dizipal.cx"
 BASE_URL = "https://dizipal.cx/diziler/page/{}/" 
-DATA_FILE = 'diziler.json'  # Tüm veriler buraya kaydedilecek
+DATA_FILE = 'diziler_full.json'
 MAX_RETRIES = 3
 
 HEADERS = {
@@ -17,16 +17,15 @@ HEADERS = {
 }
 
 def get_soup(url, retry_count=0):
-    """Verilen URL'e istek atıp BeautifulSoup objesi döner."""
     try:
-        response = requests.get(url, headers=HEADERS, timeout=20)
+        response = requests.get(url, headers=HEADERS, timeout=15)
         if response.status_code == 200:
             return BeautifulSoup(response.content, 'html.parser')
         elif response.status_code == 404:
             return "404"
     except Exception as e:
         if retry_count < MAX_RETRIES:
-            time.sleep(3) # Hata durumunda biraz daha uzun bekle
+            time.sleep(2)
             return get_soup(url, retry_count + 1)
     return None
 
@@ -37,14 +36,13 @@ def get_video_source(episode_url):
         return ""
     
     try:
-        # 1. Yöntem: video-player-area
         player_area = soup.find('div', class_='video-player-area')
         if player_area:
             iframe = player_area.find('iframe')
             if iframe:
                 return iframe.get('src')
         
-        # 2. Yöntem: Genel Iframe taraması (Yedek)
+        # Fallback
         iframes = soup.find_all('iframe')
         for frame in iframes:
             src = frame.get('src', '')
@@ -74,11 +72,9 @@ def get_episodes_from_page(soup):
             
             # Video kaynağını çek
             if ep_url:
-                # Sunucuyu boğmamak için çok kısa bekleme (opsiyonel)
-                # time.sleep(0.1) 
+                # time.sleep(0.5) # Sunucuyu yormamak için açabilirsin
                 video_src = get_video_source(ep_url)
                 ep_data['video_source'] = video_src
-                # İlerlemeyi görmek için yazdırıyoruz
                 print(f"      ✅ {ep_data.get('title', 'Bölüm')} -> Kaynak Alındı", flush=True)
         
         num_tag = item.find('h4', class_='font-eudoxus')
@@ -107,7 +103,7 @@ def get_full_series_details(url):
     }
     
     try:
-        # --- Metadata ---
+        # --- Metadata (Başlık, Yıl, Poster vb.) ---
         h1 = soup.find('h1')
         if h1:
             full_text = h1.get_text(" ", strip=True)
@@ -138,32 +134,37 @@ def get_full_series_details(url):
         genre_links = soup.find_all('a', href=lambda h: h and 'dizi-kategori' in h)
         meta['genres'] = list(set([g.get_text(strip=True) for g in genre_links]))
 
-        # --- SEZON TARAMA ---
+        # --- SEZON TARAMA MANTIĞI ---
+        # 1. Sezon listesini bul
         season_links = []
         season_div = soup.find('div', id='season-options-list')
         
         if season_div:
+            # Dropdown varsa içindeki tüm sezon linklerini al
             links = season_div.find_all('a', href=True)
             for l in links:
                 full_link = urljoin(BASE_DOMAIN, l['href'])
                 if full_link not in season_links:
                     season_links.append(full_link)
         
-        # Eğer dropdown yoksa tek sezon vardır, mevcut sayfayı ekle
+        # Eğer sezon dropdown'ı yoksa veya boşsa, sadece mevcut sayfayı (tek sezon) al
         if not season_links:
             season_links.append(url)
         
         print(f"   📂 Toplam {len(season_links)} sezon bulundu. Taranıyor...", flush=True)
 
+        # 2. Her bir sezon linkini gez
         for s_idx, season_url in enumerate(season_links):
             print(f"      📌 Sezon {s_idx+1} taranıyor...", flush=True)
             
+            # İlk sayfa zaten elimizde (soup), tekrar istek atmayalım
             if season_url == url:
                 current_season_soup = soup
             else:
                 current_season_soup = get_soup(season_url)
             
             if current_season_soup and current_season_soup != "404":
+                # O sezonun bölümlerini çek ve ana listeye ekle
                 season_episodes = get_episodes_from_page(current_season_soup)
                 meta['episodes'].extend(season_episodes)
 
@@ -173,60 +174,46 @@ def get_full_series_details(url):
     return meta
 
 def main():
-    print("🚀 DİZİPAL TARAYICI BAŞLATILIYOR (Full Mod)...")
-    
     if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r', encoding='utf-8') as f:
-                all_series = json.load(f)
-            print(f"📦 Mevcut dosya yüklendi: {len(all_series)} dizi var.")
-        except:
-            all_series = []
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            all_series = json.load(f)
     else:
         all_series = []
 
     page_num = 1
-    empty_page_count = 0 
-
-    while True: 
+    
+    while True:
         list_url = BASE_URL.format(page_num)
         print(f"\n📄 Sayfa {page_num} taranıyor: {list_url}")
         
         soup = get_soup(list_url)
-        
-        # Sayfa yoksa (404) bitir
         if not soup or soup == "404":
-            print("🏁 Sayfa bulunamadı veya bitti. Tarama tamamlandı.")
+            print("🏁 Tarama tamamlandı.")
             break
         
+        # Dizi detay linklerini bul
         links = soup.find_all('a', href=True)
         series_urls = []
         for link in links:
             href = link['href']
-            # Dizi linklerini filtrele
+            # Basit filtre: /dizi/ altında ve en az 2 slash daha içermeli
             if '/dizi/' in href and href.count('/') > 3:
                 full_url = urljoin(BASE_DOMAIN, href)
+                # Query parametrelerini temizle (?sezon=1 vs olmasın)
                 clean_url = full_url.split('?')[0]
                 if clean_url not in series_urls:
                     series_urls.append(clean_url)
 
+        # Mükerrerleri temizle
         series_urls = list(set(series_urls))
         
-        # Sayfada hiç dizi linki bulamazsa
         if not series_urls:
-            print("⚠️ Bu sayfada dizi bulunamadı.")
-            empty_page_count += 1
-            if empty_page_count >= 2: # Üst üste 2 sayfa boşsa bitir
-                print("🏁 Üst üste boş sayfa geldi. Tarama bitiriliyor.")
-                break
+            print("⚠️ Dizi bulunamadı, sonraki sayfaya geçiliyor.")
             page_num += 1
             continue
-        
-        empty_page_count = 0 # Dizi bulunduysa sayacı sıfırla
-        print(f"   🔍 Bu sayfada {len(series_urls)} dizi bulundu.")
 
         for s_url in series_urls:
-            # Daha önce eklenmişse atla
+            # Zaten ekli mi?
             if any(s['url'] == s_url for s in all_series):
                 print(f"   ⏭️ Zaten var: {s_url}")
                 continue
@@ -234,13 +221,11 @@ def main():
             details = get_full_series_details(s_url)
             if details:
                 all_series.append(details)
-                # Her dizi bitiminde dosyayı güncelle
+                # Anlık kaydetme
                 with open(DATA_FILE, 'w', encoding='utf-8') as f:
                     json.dump(all_series, f, ensure_ascii=False, indent=2)
 
         page_num += 1
-
-    print(f"\n✅ TÜM İŞLEMLER TAMAMLANDI. {len(all_series)} dizi kaydedildi.")
 
 if __name__ == "__main__":
     main()
