@@ -1,0 +1,48 @@
+name: original_update_serials.yml
+
+on:
+  schedule:
+    # UTC saati ile 22:00 (Türkiye saati ile 01:00)
+    - cron: '0 22 * * *'
+  workflow_dispatch: # Manuel çalıştırma butonu
+
+permissions:
+  contents: write
+
+jobs:
+  scrape_1538:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Depoyu Çek
+      uses: actions/checkout@v3
+
+    - name: Python 3.10 Kurulumu
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.10'
+
+    - name: Gerekli Paketleri Kur
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb google-chrome-stable
+        pip install seleniumbase curl_cffi beautifulsoup4
+        seleniumbase install chromedriver
+
+    - name: Botu Çalıştır
+      # Sanal ekran (xvfb) ile çalıştırıyoruz
+      run: xvfb-run python original_main_dizi.py
+
+    - name: Kaydet ve Github'a Yükle
+      run: |
+        git config --global user.name "Dizi Botu"
+        git config --global user.email "bot@github.com"
+        
+        git add .
+        
+        # Değişiklik varsa commit et, yoksa hata verme
+        git commit -m "Otomatik guncelleme 1538: $(date)" || echo "Değişiklik yok"
+        
+        # Olası çakışmaları önlemek için önce çek, sonra yükle
+        git pull --rebase origin main
+        git push origin main
