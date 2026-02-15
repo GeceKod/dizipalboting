@@ -13,45 +13,34 @@ jobs:
   update-movies:
     runs-on: ubuntu-latest
 
-    steps:
+   steps:
     - name: Depoyu Cek
       uses: actions/checkout@v3
-      with:
-        fetch-depth: 0 # Tüm geçmişi çek (Merge hatalarını önler)
 
     - name: Python Kurulumu
       uses: actions/setup-python@v4
       with:
-        python-version: '3.9' # Cloudscraper için 3.9 veya 3.10 idealdir
+        python-version: '3.10' # SeleniumBase 3.10 ile daha iyi çalışır
 
-    - name: Kutuphaneleri Yukle
-     run: |
+    - name: Gerekli Paketleri Kur (Chrome ve Xvfb)
+      run: |
         sudo apt-get update
         sudo apt-get install -y xvfb google-chrome-stable
         pip install seleniumbase beautifulsoup4
         # SeleniumBase için sürücüyü indir
         seleniumbase install chromedriver
 
-    - name: Botu Calistir
+    - name: Botu Calistir (Sanal Ekran Modunda)
       env:
-        # Site adresi değişirse buradan güncelleyebilirsin
         SITE_URL: 'https://dizipal.cx/diziler'
-      # NOT: Dosya adının main2.py olduğundan emin ol (son verdiğim kodun adı)
-      run: python main2.py
+      # xvfb-run komutu, tarayıcıyı sanki gerçek bir ekran varmış gibi çalıştırır (Bot korumasını aşar)
+      run: xvfb-run python main2.py
 
     - name: Degisiklikleri Kaydet ve Yukle
       run: |
         git config --global user.name "Dizi Botu"
         git config --global user.email "bot@github.com"
-        
-        # 1. Dosyaları sahneye al
         git add .
-        
-        # 2. Değişiklik varsa commit yap, yoksa devam et
-        git commit -m "Otomatik guncelleme: $(date)" || echo "Degisiklik yok"
-        
-        # 3. KRİTİK NOKTA: Sitede sen bir şey değiştirdiysen önce onu indir ve birleştir
+        git commit -m "Otomatik guncelleme" || echo "Degisiklik yok"
         git pull --rebase origin main
-        
-        # 4. Şimdi güvenle yükle
         git push origin main
