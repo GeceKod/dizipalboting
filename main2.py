@@ -8,7 +8,7 @@ from urllib.parse import urljoin
 # --- AYARLAR ---
 BASE_DOMAIN = "https://dizipal.cx"
 BASE_URL = "https://dizipal.cx/diziler/page/{}/" 
-DATA_FILE = 'diziler.json'  # Dosya ismi standart yapıldı
+DATA_FILE = 'diziler.json'  # Tüm veriler buraya kaydedilecek
 MAX_RETRIES = 3
 
 HEADERS = {
@@ -19,14 +19,14 @@ HEADERS = {
 def get_soup(url, retry_count=0):
     """Verilen URL'e istek atıp BeautifulSoup objesi döner."""
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        response = requests.get(url, headers=HEADERS, timeout=20)
         if response.status_code == 200:
             return BeautifulSoup(response.content, 'html.parser')
         elif response.status_code == 404:
             return "404"
     except Exception as e:
         if retry_count < MAX_RETRIES:
-            time.sleep(2)
+            time.sleep(3) # Hata durumunda biraz daha uzun bekle
             return get_soup(url, retry_count + 1)
     return None
 
@@ -74,9 +74,11 @@ def get_episodes_from_page(soup):
             
             # Video kaynağını çek
             if ep_url:
-                # Video kaynağını çekmek için bölüm detayına git
+                # Sunucuyu boğmamak için çok kısa bekleme (opsiyonel)
+                # time.sleep(0.1) 
                 video_src = get_video_source(ep_url)
                 ep_data['video_source'] = video_src
+                # İlerlemeyi görmek için yazdırıyoruz
                 print(f"      ✅ {ep_data.get('title', 'Bölüm')} -> Kaynak Alındı", flush=True)
         
         num_tag = item.find('h4', class_='font-eudoxus')
@@ -156,7 +158,6 @@ def get_full_series_details(url):
         for s_idx, season_url in enumerate(season_links):
             print(f"      📌 Sezon {s_idx+1} taranıyor...", flush=True)
             
-            # İlk sayfa zaten elimizde (soup), tekrar istek atmayalım
             if season_url == url:
                 current_season_soup = soup
             else:
@@ -172,24 +173,30 @@ def get_full_series_details(url):
     return meta
 
 def main():
-    print("🚀 TEST BAŞLIYOR: Sadece 1. sayfa taranacak...")
+    print("🚀 DİZİPAL TARAYICI BAŞLATILIYOR (Full Mod)...")
     
     if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, 'r', encoding='utf-8') as f:
-            all_series = json.load(f)
+        try:
+            with open(DATA_FILE, 'r', encoding='utf-8') as f:
+                all_series = json.load(f)
+            print(f"📦 Mevcut dosya yüklendi: {len(all_series)} dizi var.")
+        except:
+            all_series = []
     else:
         all_series = []
 
     page_num = 1
-    
-    # --- SADECE 1. SAYFA KONTROLÜ ---
-    while page_num <= 1: 
+    empty_page_count = 0 
+
+    while True: 
         list_url = BASE_URL.format(page_num)
         print(f"\n📄 Sayfa {page_num} taranıyor: {list_url}")
         
         soup = get_soup(list_url)
+        
+        # Sayfa yoksa (404) bitir
         if not soup or soup == "404":
-            print("🏁 Sayfa bulunamadı.")
+            print("🏁 Sayfa bulunamadı veya bitti. Tarama tamamlandı.")
             break
         
         links = soup.find_all('a', href=True)
@@ -205,11 +212,18 @@ def main():
 
         series_urls = list(set(series_urls))
         
+        # Sayfada hiç dizi linki bulamazsa
         if not series_urls:
             print("⚠️ Bu sayfada dizi bulunamadı.")
-            break
-
-        print(f"   🔍 Bu sayfada {len(series_urls)} dizi bulundu. İşleniyor...")
+            empty_page_count += 1
+            if empty_page_count >= 2: # Üst üste 2 sayfa boşsa bitir
+                print("🏁 Üst üste boş sayfa geldi. Tarama bitiriliyor.")
+                break
+            page_num += 1
+            continue
+        
+        empty_page_count = 0 # Dizi bulunduysa sayacı sıfırla
+        print(f"   🔍 Bu sayfada {len(series_urls)} dizi bulundu.")
 
         for s_url in series_urls:
             # Daha önce eklenmişse atla
@@ -220,13 +234,13 @@ def main():
             details = get_full_series_details(s_url)
             if details:
                 all_series.append(details)
-                # Her dizi bitiminde kaydet
+                # Her dizi bitiminde dosyayı güncelle
                 with open(DATA_FILE, 'w', encoding='utf-8') as f:
                     json.dump(all_series, f, ensure_ascii=False, indent=2)
 
         page_num += 1
 
-    print(f"\n✅ İŞLEM TAMAMLANDI. Veriler '{DATA_FILE}' dosyasına kaydedildi.")
+    print(f"\n✅ TÜM İŞLEMLER TAMAMLANDI. {len(all_series)} dizi kaydedildi.")
 
 if __name__ == "__main__":
     main()
