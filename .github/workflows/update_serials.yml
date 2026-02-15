@@ -25,10 +25,12 @@ jobs:
         python-version: '3.9' # Cloudscraper için 3.9 veya 3.10 idealdir
 
     - name: Kutuphaneleri Yukle
-      run: |
-        python -m pip install --upgrade pip
-        # Yeni ve daha güçlü kütüphaneyi yüklüyoruz:
-        pip install curl_cffi beautifulsoup4 requests
+     run: |
+        sudo apt-get update
+        sudo apt-get install -y xvfb google-chrome-stable
+        pip install seleniumbase beautifulsoup4
+        # SeleniumBase için sürücüyü indir
+        seleniumbase install chromedriver
 
     - name: Botu Calistir
       env:
