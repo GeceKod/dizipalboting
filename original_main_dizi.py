@@ -16,7 +16,10 @@ DATA_FILE = 'diziler_1538.json'
 session = requests.Session()
 
 def get_cookies_and_ua_with_selenium():
-    """Selenium ile Cloudflare 'Attention Required' ekranını geçer."""
+    """
+    Selenium ile Cloudflare 'Attention Required' ekranını geçer.
+    Yöntem: Reconnect (Bağlantı yenileme) stratejisi kullanılır.
+    """
     print(f"🔓 Selenium ile Cloudflare kilidi açılıyor: {BASE_DOMAIN} ...", flush=True)
     cookies = {}
     user_agent = ""
@@ -25,45 +28,51 @@ def get_cookies_and_ua_with_selenium():
     # incognito=True: Temiz başlangıç
     with SB(uc=True, headless=False, incognito=True) as sb:
         try:
-            # Siteye git
-            sb.open(BASE_DOMAIN + "/diziler/")
+            # ÖZEL TAKTİK: Reconnect ile açma
+            # Bu, tarayıcıyı açar, bağlantıyı kesip tekrar bağlar (Parmak izini karıştırır)
+            print("   ⚡ Reconnect stratejisi uygulanıyor...", flush=True)
+            sb.uc_open_with_reconnect(BASE_DOMAIN + "/diziler/", reconnect_time=6)
             
-            # --- KRİTİK BÖLÜM: Cloudflare Geçişi ---
+            # Cloudflare kutusu varsa tıkla (Döngü ile kontrol)
             print("   ⏳ Cloudflare kontrolü bekleniyor...", flush=True)
             
-            # 1. Aşama: Sayfa yüklensin
-            time.sleep(5)
-            
-            # 2. Aşama: Eğer Captcha/Turnstile varsa tıkla
-            # SeleniumBase'in özel fonksiyonu: Ekranda Cloudflare kutusu varsa tıklar
-            try:
+            for i in range(3): # 3 kez deneme şansı
                 if sb.is_element_visible('iframe[src*="cloudflare"]'):
+                    print(f"   👆 Cloudflare kutusuna tıklandı! (Deneme {i+1})", flush=True)
                     sb.uc_gui_click_captcha()
-                    print("   👆 Cloudflare kutusuna tıklandı!", flush=True)
-                    time.sleep(5)
-            except Exception as e:
-                print(f"   ℹ️ Captcha tıklama denenmedi veya gerekmedi: {e}", flush=True)
+                    time.sleep(4)
+                
+                title = sb.get_title()
+                if "Attention" not in title and "Just a moment" not in title:
+                    break # Başarılı, döngüden çık
+                
+                time.sleep(2)
 
-            # 3. Aşama: Başlığı Kontrol Et
+            # Başlık Kontrolü
             title = sb.get_title()
             print(f"   🔓 Site Başlığı: {title}", flush=True)
             
-            # Eğer hala "Attention Required" veya "Just a moment" ise başarısız olduk demektir
+            # Eğer hala geçemediysek
             if "Attention" in title or "Just a moment" in title:
-                print("   ❌ Cloudflare geçilemedi! Tekrar deneniyor...", flush=True)
-                sb.uc_gui_click_captcha() # Son bir şans daha
-                time.sleep(5)
+                print("   ❌ Cloudflare geçilemedi!", flush=True)
+                return None, None
             
             # Verileri al
             user_agent = sb.get_user_agent()
             sb_cookies = sb.get_cookies()
             for cookie in sb_cookies:
                 cookies[cookie['name']] = cookie['value']
+            
+            # Kritik Kontrol: Çerez boşsa başarısız say
+            if not cookies:
+                print("   ❌ Giriş yapıldı ama çerezler boş!", flush=True)
+                return None, None
                 
             print(f"   ✅ Giriş Başarılı! ({len(cookies)} çerez alındı)", flush=True)
             
         except Exception as e:
             print(f"   ❌ Selenium kritik hatası: {e}", flush=True)
+            return None, None
             
     return cookies, user_agent
 
@@ -219,13 +228,12 @@ def get_full_series_details(url, cookies, user_agent, existing_episodes_list=[])
     return meta
 
 def main():
-    print("🛡️ Dizipal 1538 Botu Başlatılıyor (Anti-Cloudflare Mod)...", flush=True)
+    print("🛡️ Dizipal 1538 Botu Başlatılıyor (Anti-Cloudflare V2)...", flush=True)
     
     cookies, user_agent = get_cookies_and_ua_with_selenium()
     
-    # Çerez kontrolü: Eğer boşsa veya hala 'Attention Required' başlığı varsa iptal et
     if not cookies:
-        print("❌ Çerezler alınamadı! Cloudflare geçilemedi.", flush=True)
+        print("❌ Çerezler alınamadı! Program durduruluyor.", flush=True)
         return
 
     if os.path.exists(DATA_FILE):
@@ -250,12 +258,11 @@ def main():
         if soup == "403":
             print("🔄 403 Hatası! Cloudflare tekrar devreye girdi. Yenileniyor...", flush=True)
             cookies, user_agent = get_cookies_and_ua_with_selenium()
+            # Eğer yenileme de başarısızsa durdur
+            if not cookies:
+                 print("❌ Çerez yenileme başarısız. Durduruluyor.", flush=True)
+                 break
             soup = get_soup_fast(target_url, cookies, user_agent)
-            
-            # Yenilemeye rağmen 403 ise bu turu pas geç
-            if soup == "403":
-                print("❌ Yenileme başarısız oldu, program durduruluyor.", flush=True)
-                break
 
         if not soup or soup == "404":
             print("🏁 Sayfa yok. Bitti.", flush=True)
@@ -265,7 +272,6 @@ def main():
         series_urls = []
         for link in links:
             href = link['href']
-            # Dizi linki filtresi
             if '/dizi/' in href and href.count('/') > 3 and 'sezon' not in href and 'bolum' not in href:
                 full_url = urljoin(BASE_DOMAIN, href)
                 clean_url = full_url.split('?')[0]
@@ -294,7 +300,10 @@ def main():
                 if update_data == "403":
                     print("🚨 DİZİ İÇİNDE 403! Yenileniyor...", flush=True)
                     cookies, user_agent = get_cookies_and_ua_with_selenium()
-                    update_data = get_full_series_details(s_url, cookies, user_agent, existing_episodes_list=known_urls)
+                    if cookies:
+                        update_data = get_full_series_details(s_url, cookies, user_agent, existing_episodes_list=known_urls)
+                    else:
+                        print("❌ Çerez yenileme başarısız.", flush=True)
 
                 if update_data and update_data != "403" and update_data['episodes']:
                     existing_series['episodes'].extend(update_data['episodes'])
@@ -309,7 +318,10 @@ def main():
                 if new_details == "403":
                     print("🚨 DİZİ İÇİNDE 403! Yenileniyor...", flush=True)
                     cookies, user_agent = get_cookies_and_ua_with_selenium()
-                    new_details = get_full_series_details(s_url, cookies, user_agent, existing_episodes_list=[])
+                    if cookies:
+                        new_details = get_full_series_details(s_url, cookies, user_agent, existing_episodes_list=[])
+                    else:
+                         print("❌ Çerez yenileme başarısız.", flush=True)
                 
                 if new_details and new_details != "403":
                     all_series.append(new_details)
