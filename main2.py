@@ -11,26 +11,24 @@ from urllib.parse import urljoin
 BASE_DOMAIN = "https://dizipal.cx"
 DATA_FILE = 'diziler.json'
 
+# Global Session
+session = requests.Session()
+
 def get_cookies_and_ua_with_selenium():
-    """Selenium ile siteye girip Cloudflare çerezlerini ve User-Agent'ı çalar."""
-    print("🔓 Selenium ile Cloudflare kilidi açılıyor...")
+    """Selenium ile siteye girip Cloudflare çerezlerini ve User-Agent'ı alır."""
+    print("🔓 Selenium ile Cloudflare kilidi açılıyor (Diziler)...")
     cookies = {}
     user_agent = ""
     
     with SB(uc=True, headless=False) as sb:
         try:
             sb.open(BASE_DOMAIN + "/diziler/")
-            # Cloudflare kontrolünü geçmesi için biraz bekle
             time.sleep(6) 
             
-            # Başlık 403 veya 404 değilse giriş başarılıdır
             title = sb.get_title()
             print(f"   🔓 Site Başlığı: {title}")
             
-            # User Agent'ı al
             user_agent = sb.get_user_agent()
-            
-            # Çerezleri al ve requests formatına çevir
             sb_cookies = sb.get_cookies()
             for cookie in sb_cookies:
                 cookies[cookie['name']] = cookie['value']
@@ -42,9 +40,6 @@ def get_cookies_and_ua_with_selenium():
             
     return cookies, user_agent
 
-# Global Session nesnesi
-session = requests.Session()
-
 def get_soup_fast(url, cookies, user_agent):
     """Curl_CFFI ile hızlı istek atar."""
     headers = {
@@ -52,7 +47,6 @@ def get_soup_fast(url, cookies, user_agent):
         'Referer': BASE_DOMAIN,
     }
     try:
-        # impersonate="chrome110" ile tarayıcı taklidi yapıp çerezleri basıyoruz
         response = session.get(
             url, 
             cookies=cookies, 
@@ -66,35 +60,30 @@ def get_soup_fast(url, cookies, user_agent):
         elif response.status_code == 404:
             return "404"
         elif response.status_code == 403:
-            print("   ⚠️ Hızlı mod 403 yedi (Çerez süresi dolmuş olabilir).")
+            # Burası kritik: 403 dönerse string olarak "403" yolluyoruz
             return "403"
     except Exception as e:
         print(f"   ⚠️ Hızlı mod hatası: {e}")
     return None
 
 def get_video_source(soup):
-    """Sayfa kaynağındaki iframe'i bulur."""
     try:
-        # Yöntem 1: Player alanı
         player_area = soup.find('div', class_='video-player-area')
         if player_area:
             iframe = player_area.find('iframe')
-            if iframe:
-                return iframe.get('src')
+            if iframe: return iframe.get('src')
         
-        # Yöntem 2: Genel Iframe
         iframes = soup.find_all('iframe')
         for frame in iframes:
             src = frame.get('src', '')
             if 'embed' in src or '.cfd' in src or 'player' in src:
                 return src
-    except:
-        pass
+    except: pass
     return ""
 
-def get_episodes_from_page(soup, cookies, user_agent):
-    """Bir sayfa (sezon) içindeki bölümleri parse eder."""
-    episodes = []
+def get_episodes_from_page(soup, cookies, user_agent, known_urls=[]):
+    """Bölümleri parse eder."""
+    new_episodes = []
     episode_items = soup.find_all('div', class_='episode-item')
     
     for item in episode_items:
@@ -103,34 +92,45 @@ def get_episodes_from_page(soup, cookies, user_agent):
         
         if link_tag:
             ep_url = link_tag.get('href')
+            title = link_tag.get('title')
+            
+            if ep_url in known_urls:
+                continue 
+
             ep_data['url'] = ep_url
-            ep_data['title'] = link_tag.get('title')
+            ep_data['title'] = title
             
             img_tag = link_tag.find('img')
             if img_tag:
                 ep_data['thumbnail'] = img_tag.get('src')
             
             if ep_url:
-                # Bölümün içine girip video kaynağını al (Hızlı mod)
-                # time.sleep(0.2) # Sunucuyu çökertmemek için çok minik bekleme
                 ep_soup = get_soup_fast(ep_url, cookies, user_agent)
                 if ep_soup and ep_soup not in ["404", "403"]:
                     video_src = get_video_source(ep_soup)
                     ep_data['video_source'] = video_src
-                    print(f"      ✅ {ep_data.get('title', 'Bölüm')} -> Kaynak Alındı", flush=True)
+                    print(f"      ✅ YENİ BÖLÜM: {ep_data.get('title')} -> Kaynak Alındı", flush=True)
 
         num_tag = item.find('h4', class_='font-eudoxus')
         if num_tag:
             ep_data['episode_number'] = num_tag.get_text(strip=True)
         
-        episodes.append(ep_data)
-    return episodes
+        if 'url' in ep_data:
+            new_episodes.append(ep_data)
 
-def get_full_series_details(url, cookies, user_agent):
-    print(f"   ▶️ Dizi Analiz ediliyor: {url}")
+    return new_episodes
+
+def get_full_series_details(url, cookies, user_agent, existing_episodes_list=[]):
+    """Dizi detaylarını çeker."""
+    print(f"   ▶️ Analiz: {url}")
     soup = get_soup_fast(url, cookies, user_agent)
     
-    if not soup or soup == "404" or soup == "403":
+    # EĞER BURADA 403 ALIRSAK DİREKT "403" DÖNÜYORUZ (None değil)
+    if soup == "403":
+        print("   ⚠️ Detay sayfasında 403 alındı! (Çerez yenilenmeli)")
+        return "403"
+    
+    if not soup or soup == "404":
         return None
     
     meta = {
@@ -142,7 +142,7 @@ def get_full_series_details(url, cookies, user_agent):
         "cover_image": "",
         "imdb": "0",
         "genres": [],
-        "episodes": []
+        "episodes": [] 
     }
     
     try:
@@ -190,17 +190,14 @@ def get_full_series_details(url, cookies, user_agent):
         if not season_links:
             season_links.append(url)
         
-        print(f"   📂 {len(season_links)} Sezon bulundu.", flush=True)
-
         for s_idx, season_url in enumerate(season_links):
-            print(f"      📌 Sezon {s_idx+1} taranıyor...", flush=True)
             if season_url == url:
                 current_season_soup = soup
             else:
                 current_season_soup = get_soup_fast(season_url, cookies, user_agent)
             
             if current_season_soup and current_season_soup not in ["404", "403"]:
-                season_episodes = get_episodes_from_page(current_season_soup, cookies, user_agent)
+                season_episodes = get_episodes_from_page(current_season_soup, cookies, user_agent, existing_episodes_list)
                 meta['episodes'].extend(season_episodes)
 
     except Exception as e:
@@ -209,18 +206,13 @@ def get_full_series_details(url, cookies, user_agent):
     return meta
 
 def main():
-    print("🚀 DİZİPAL HİBRİT TARAYICI (Selenium + Curl_CFFI)...")
+    print("🛡️ Güneş TV: Dizi Botu (Hata Telafili Mod)...")
     
-    # 1. ADIM: Selenium ile Çerezleri Al
     cookies, user_agent = get_cookies_and_ua_with_selenium()
-    
     if not cookies:
-        print("❌ Çerezler alınamadı, program durduruluyor.")
+        print("❌ Çerezler alınamadı.")
         return
 
-    # 2. ADIM: Hızlı Mod ile Verileri Çek
-    print("⚡ Hızlı Mod Başlatılıyor...")
-    
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
@@ -235,20 +227,16 @@ def main():
     empty_page_count = 0 
 
     while True:
-        if page_num == 1:
-            list_url = "https://dizipal.cx/diziler/"
-        else:
-            list_url = f"https://dizipal.cx/diziler/page/{page_num}/"
-            
-        print(f"\n📄 Sayfa {page_num} taranıyor: {list_url}")
+        target_url = f"{BASE_DOMAIN}/diziler/page/{page_num}/" if page_num > 1 else f"{BASE_DOMAIN}/diziler/"
+        print(f"\n--- 📄 SAYFA {page_num}: {target_url} ---")
         
-        soup = get_soup_fast(list_url, cookies, user_agent)
+        soup = get_soup_fast(target_url, cookies, user_agent)
         
-        # Eğer çerezlerin süresi dolarsa (403), Selenium ile tekrar al (Opsiyonel Geliştirme)
+        # Sayfa listesinde 403 alırsak
         if soup == "403":
-            print("🔄 Çerez süresi doldu, yenileniyor...")
+            print("🔄 Sayfa erişiminde 403! Çerez yenileniyor...")
             cookies, user_agent = get_cookies_and_ua_with_selenium()
-            soup = get_soup_fast(list_url, cookies, user_agent)
+            soup = get_soup_fast(target_url, cookies, user_agent)
 
         if not soup or soup == "404":
             print("🏁 Sayfa yok. Bitti.")
@@ -269,8 +257,7 @@ def main():
         if not series_urls:
             print("⚠️ Dizi bulunamadı.")
             empty_page_count += 1
-            if empty_page_count >= 2:
-                break
+            if empty_page_count >= 2: break
             page_num += 1
             continue
         
@@ -278,15 +265,50 @@ def main():
         print(f"   🔍 {len(series_urls)} dizi bulundu.")
 
         for s_url in series_urls:
-            if any(s['url'] == s_url for s in all_series):
-                print(f"   ⏭️ Zaten var: {s_url}")
-                continue
+            # --- YENİLENMİŞ DÖNGÜ MANTIĞI ---
             
-            details = get_full_series_details(s_url, cookies, user_agent)
-            if details:
-                all_series.append(details)
-                with open(DATA_FILE, 'w', encoding='utf-8') as f:
-                    json.dump(all_series, f, ensure_ascii=False, indent=2)
+            existing_series = next((s for s in all_series if s['url'] == s_url), None)
+            
+            if existing_series:
+                # GÜNCELLEME MODU
+                known_urls = [ep['url'] for ep in existing_series.get('episodes', []) if 'url' in ep]
+                
+                update_data = get_full_series_details(s_url, cookies, user_agent, existing_episodes_list=known_urls)
+                
+                # Eğer 403 döndüyse (Çerez bitti)
+                if update_data == "403":
+                    print("🚨 DİZİ İÇİNDE ÇEREZ BİTTİ! Yenilenip tekrar deneniyor...")
+                    cookies, user_agent = get_cookies_and_ua_with_selenium()
+                    # Aynı diziyi tekrar dene
+                    update_data = get_full_series_details(s_url, cookies, user_agent, existing_episodes_list=known_urls)
+
+                if update_data and update_data != "403" and update_data['episodes']:
+                    count_new = len(update_data['episodes'])
+                    existing_series['episodes'].extend(update_data['episodes'])
+                    print(f"   🆙 GÜNCELLENDİ: {count_new} yeni bölüm -> {existing_series.get('title')}")
+                    
+                    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(all_series, f, ensure_ascii=False, indent=2)
+                else:
+                    pass # Güncel veya hata
+            
+            else:
+                # YENİ DİZİ MODU
+                new_details = get_full_series_details(s_url, cookies, user_agent, existing_episodes_list=[])
+                
+                # Eğer 403 döndüyse (Çerez bitti)
+                if new_details == "403":
+                    print("🚨 DİZİ İÇİNDE ÇEREZ BİTTİ! Yenilenip tekrar deneniyor...")
+                    cookies, user_agent = get_cookies_and_ua_with_selenium()
+                    # Aynı diziyi tekrar dene
+                    new_details = get_full_series_details(s_url, cookies, user_agent, existing_episodes_list=[])
+                
+                if new_details and new_details != "403":
+                    all_series.append(new_details)
+                    print(f"   ✅ YENİ DİZİ EKLENDİ: {new_details.get('title')}")
+                    
+                    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(all_series, f, ensure_ascii=False, indent=2)
 
         page_num += 1
 
