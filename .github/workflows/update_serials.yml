@@ -1,46 +1,105 @@
 name: Dizi Botu Güncelleyici
 
+
+
 on:
+
   schedule:
+
     # Her gün saat 00:00 ve 12:00'da (UTC) çalışır
+
     - cron: '0 0,12 * * *'
+
   workflow_dispatch: # Manuel çalıştırma butonu
 
+
+
 permissions:
+
   contents: write
 
+
+
 jobs:
+
   update-movies:
+
     runs-on: ubuntu-latest
 
-   steps:
+
+
+    steps:
+
     - name: Depoyu Cek
+
       uses: actions/checkout@v3
 
-    - name: Python Kurulumu
-      uses: actions/setup-python@v4
       with:
-        python-version: '3.10' # SeleniumBase 3.10 ile daha iyi çalışır
 
-    - name: Gerekli Paketleri Kur (Chrome ve Xvfb)
+        fetch-depth: 0 # Tüm geçmişi çek (Merge hatalarını önler)
+
+
+
+    - name: Python Kurulumu
+
+      uses: actions/setup-python@v4
+
+      with:
+
+        python-version: '3.9'
+
+
+
+    - name: Kutuphaneleri Yukle
+
       run: |
-        sudo apt-get update
-        sudo apt-get install -y xvfb google-chrome-stable
-        pip install seleniumbase beautifulsoup4
-        # SeleniumBase için sürücüyü indir
-        seleniumbase install chromedriver
 
-    - name: Botu Calistir (Sanal Ekran Modunda)
+        pip install -r requirements.txt
+
+
+
+    - name: Botu Calistir
+
       env:
-        SITE_URL: 'https://dizipal.cx/diziler'
-      # xvfb-run komutu, tarayıcıyı sanki gerçek bir ekran varmış gibi çalıştırır (Bot korumasını aşar)
-      run: xvfb-run python main2.py
+
+        # Site adresi değişirse buradan veya Secrets kısmından güncelleyebilirsin
+
+        SITE_URL: ${{ secrets.SITE_URL || 'https://dizipal.cx/diziler' }}
+
+      run: python main2.py
+
+
 
     - name: Degisiklikleri Kaydet ve Yukle
+
       run: |
+
         git config --global user.name "Dizi Botu"
+
         git config --global user.email "bot@github.com"
+
+        
+
+        # 1. Dosyaları sahneye al
+
         git add .
+
+        
+
+        # 2. Değişiklik varsa commit yap, yoksa devam et
+
         git commit -m "Otomatik guncelleme" || echo "Degisiklik yok"
+
+        
+
+        # 3. KRİTİK NOKTA: Sitede sen bir şey değiştirdiysen önce onu indir ve birleştir
+
+        # Bu komut 'failed to push' hatasını %100 çözer
+
         git pull --rebase origin main
+
+        
+
+        # 4. Şimdi güvenle yükle
+
         git push origin main
