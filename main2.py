@@ -1,4 +1,5 @@
 from seleniumbase import SB
+from curl_cffi import requests
 from bs4 import BeautifulSoup
 import json
 import time
@@ -10,18 +11,70 @@ from urllib.parse import urljoin
 BASE_DOMAIN = "https://dizipal.cx"
 DATA_FILE = 'diziler.json'
 
-def get_video_source(sb, episode_url):
-    """Bölüm sayfasına girip iframe src'yi alır."""
-    try:
-        sb.open(episode_url)
-        # Sayfanın yüklenmesini bekle (Video player div'i görünene kadar)
+def get_cookies_and_ua_with_selenium():
+    """Selenium ile siteye girip Cloudflare çerezlerini ve User-Agent'ı çalar."""
+    print("🔓 Selenium ile Cloudflare kilidi açılıyor...")
+    cookies = {}
+    user_agent = ""
+    
+    with SB(uc=True, headless=False) as sb:
         try:
-            sb.wait_for_element('div.video-player-area', timeout=5)
-        except:
-            pass # Bulamazsa devam et
+            sb.open(BASE_DOMAIN + "/diziler/")
+            # Cloudflare kontrolünü geçmesi için biraz bekle
+            time.sleep(6) 
+            
+            # Başlık 403 veya 404 değilse giriş başarılıdır
+            title = sb.get_title()
+            print(f"   🔓 Site Başlığı: {title}")
+            
+            # User Agent'ı al
+            user_agent = sb.get_user_agent()
+            
+            # Çerezleri al ve requests formatına çevir
+            sb_cookies = sb.get_cookies()
+            for cookie in sb_cookies:
+                cookies[cookie['name']] = cookie['value']
+                
+            print("   ✅ Giriş kartı (Cookies) alındı!")
+            
+        except Exception as e:
+            print(f"   ❌ Selenium hatası: {e}")
+            
+    return cookies, user_agent
+
+# Global Session nesnesi
+session = requests.Session()
+
+def get_soup_fast(url, cookies, user_agent):
+    """Curl_CFFI ile hızlı istek atar."""
+    headers = {
+        'User-Agent': user_agent,
+        'Referer': BASE_DOMAIN,
+    }
+    try:
+        # impersonate="chrome110" ile tarayıcı taklidi yapıp çerezleri basıyoruz
+        response = session.get(
+            url, 
+            cookies=cookies, 
+            headers=headers, 
+            impersonate="chrome110", 
+            timeout=15
+        )
         
-        soup = BeautifulSoup(sb.get_page_source(), 'html.parser')
-        
+        if response.status_code == 200:
+            return BeautifulSoup(response.content, 'html.parser')
+        elif response.status_code == 404:
+            return "404"
+        elif response.status_code == 403:
+            print("   ⚠️ Hızlı mod 403 yedi (Çerez süresi dolmuş olabilir).")
+            return "403"
+    except Exception as e:
+        print(f"   ⚠️ Hızlı mod hatası: {e}")
+    return None
+
+def get_video_source(soup):
+    """Sayfa kaynağındaki iframe'i bulur."""
+    try:
         # Yöntem 1: Player alanı
         player_area = soup.find('div', class_='video-player-area')
         if player_area:
@@ -35,37 +88,64 @@ def get_video_source(sb, episode_url):
             src = frame.get('src', '')
             if 'embed' in src or '.cfd' in src or 'player' in src:
                 return src
-    except Exception as e:
-        print(f"      ⚠️ Video kaynağı alınamadı: {e}")
+    except:
+        pass
     return ""
 
-def get_full_series_details(sb, url):
+def get_episodes_from_page(soup, cookies, user_agent):
+    """Bir sayfa (sezon) içindeki bölümleri parse eder."""
+    episodes = []
+    episode_items = soup.find_all('div', class_='episode-item')
+    
+    for item in episode_items:
+        ep_data = {}
+        link_tag = item.find('a')
+        
+        if link_tag:
+            ep_url = link_tag.get('href')
+            ep_data['url'] = ep_url
+            ep_data['title'] = link_tag.get('title')
+            
+            img_tag = link_tag.find('img')
+            if img_tag:
+                ep_data['thumbnail'] = img_tag.get('src')
+            
+            if ep_url:
+                # Bölümün içine girip video kaynağını al (Hızlı mod)
+                # time.sleep(0.2) # Sunucuyu çökertmemek için çok minik bekleme
+                ep_soup = get_soup_fast(ep_url, cookies, user_agent)
+                if ep_soup and ep_soup not in ["404", "403"]:
+                    video_src = get_video_source(ep_soup)
+                    ep_data['video_source'] = video_src
+                    print(f"      ✅ {ep_data.get('title', 'Bölüm')} -> Kaynak Alındı", flush=True)
+
+        num_tag = item.find('h4', class_='font-eudoxus')
+        if num_tag:
+            ep_data['episode_number'] = num_tag.get_text(strip=True)
+        
+        episodes.append(ep_data)
+    return episodes
+
+def get_full_series_details(url, cookies, user_agent):
     print(f"   ▶️ Dizi Analiz ediliyor: {url}")
+    soup = get_soup_fast(url, cookies, user_agent)
+    
+    if not soup or soup == "404" or soup == "403":
+        return None
+    
+    meta = {
+        "url": url,
+        "title": "",
+        "year": "",
+        "description": "",
+        "poster": "",
+        "cover_image": "",
+        "imdb": "0",
+        "genres": [],
+        "episodes": []
+    }
     
     try:
-        sb.open(url)
-        # Cloudflare kontrolü varsa geçmesini bekle
-        time.sleep(random.uniform(2, 4)) 
-        
-        soup = BeautifulSoup(sb.get_page_source(), 'html.parser')
-        
-        # Eğer sayfa boş veya 404 ise
-        if "Sayfa bulunamadı" in soup.text or sb.get_title() == "404 Not Found":
-            return None
-
-        meta = {
-            "url": url,
-            "title": "",
-            "year": "",
-            "description": "",
-            "poster": "",
-            "cover_image": "",
-            "imdb": "0",
-            "genres": [],
-            "episodes": []
-        }
-
-        # Metadata Çekme İşlemleri
         h1 = soup.find('h1')
         if h1:
             full_text = h1.get_text(" ", strip=True)
@@ -112,64 +192,34 @@ def get_full_series_details(sb, url):
         
         print(f"   📂 {len(season_links)} Sezon bulundu.", flush=True)
 
-        # Sezonları Gez
         for s_idx, season_url in enumerate(season_links):
             print(f"      📌 Sezon {s_idx+1} taranıyor...", flush=True)
+            if season_url == url:
+                current_season_soup = soup
+            else:
+                current_season_soup = get_soup_fast(season_url, cookies, user_agent)
             
-            # Eğer zaten o sayfadaysak tekrar yükleme
-            if season_url != sb.get_current_url():
-                sb.open(season_url)
-                time.sleep(2)
-            
-            season_soup = BeautifulSoup(sb.get_page_source(), 'html.parser')
-            episode_items = season_soup.find_all('div', class_='episode-item')
-            
-            for item in episode_items:
-                ep_data = {}
-                link_tag = item.find('a')
-                
-                if link_tag:
-                    ep_url = link_tag.get('href')
-                    ep_data['url'] = ep_url
-                    ep_data['title'] = link_tag.get('title')
-                    
-                    img_tag = link_tag.find('img')
-                    if img_tag:
-                        ep_data['thumbnail'] = img_tag.get('src')
-                    
-                    if ep_url:
-                        # Video için yeni sekmeye gerek yok, mevcut sayfada git-gel yapacağız
-                        # Veya basitçe URL'yi ziyaret edeceğiz.
-                        # NOT: Her bölüme girmek çok zaman alacağı için burada dikkatli olunmalı.
-                        # Hız için şimdilik ana sayfaya dönme mantığını kurgulamalıyız.
-                        pass 
-
-                num_tag = item.find('h4', class_='font-eudoxus')
-                if num_tag:
-                    ep_data['episode_number'] = num_tag.get_text(strip=True)
-                
-                meta['episodes'].append(ep_data)
-
-        # NOT: Video kaynaklarını toplamak için bölümleri tek tek gezmek gerek
-        # Bu işlem Selenium ile ÇOK UZUN sürer (Her bölüm 5-10 saniye). 
-        # O yüzden şimdilik sadece bölüm listesini alıyoruz.
-        # Eğer video player'ı MUTLAKA istiyorsanız aşağıyı açın:
-        
-        print(f"      🎥 Bölüm playerları taranıyor ({len(meta['episodes'])} bölüm)...")
-        for ep in meta['episodes']:
-            if 'url' in ep:
-                 src = get_video_source(sb, ep['url'])
-                 ep['video_source'] = src
-                 print(f"         -> {ep.get('title')} : {src}", flush=True)
-
-        return meta
+            if current_season_soup and current_season_soup not in ["404", "403"]:
+                season_episodes = get_episodes_from_page(current_season_soup, cookies, user_agent)
+                meta['episodes'].extend(season_episodes)
 
     except Exception as e:
         print(f"   ❌ Hata: {e}")
-        return None
+
+    return meta
 
 def main():
-    print("🚀 DİZİPAL TARAYICI (SeleniumBase UC Modu)...")
+    print("🚀 DİZİPAL HİBRİT TARAYICI (Selenium + Curl_CFFI)...")
+    
+    # 1. ADIM: Selenium ile Çerezleri Al
+    cookies, user_agent = get_cookies_and_ua_with_selenium()
+    
+    if not cookies:
+        print("❌ Çerezler alınamadı, program durduruluyor.")
+        return
+
+    # 2. ADIM: Hızlı Mod ile Verileri Çek
+    print("⚡ Hızlı Mod Başlatılıyor...")
     
     if os.path.exists(DATA_FILE):
         try:
@@ -181,72 +231,64 @@ def main():
     else:
         all_series = []
 
-    # UC=True -> Undetected Chromedriver (Bot korumasını aşar)
-    # Headless=False -> Xvfb ile sanal ekranda "görünür" çalışır (Daha güvenli)
-    with SB(uc=True, headless=False) as sb:
-        page_num = 1
-        empty_page_count = 0 
+    page_num = 1
+    empty_page_count = 0 
 
-        while True:
-            if page_num == 1:
-                list_url = "https://dizipal.cx/diziler/"
-            else:
-                list_url = f"https://dizipal.cx/diziler/page/{page_num}/"
-                
-            print(f"\n📄 Sayfa {page_num} açılıyor: {list_url}")
+    while True:
+        if page_num == 1:
+            list_url = "https://dizipal.cx/diziler/"
+        else:
+            list_url = f"https://dizipal.cx/diziler/page/{page_num}/"
             
-            try:
-                sb.open(list_url)
-                # Cloudflare "Human Verify" çıkarsa bekle
-                time.sleep(3) 
-                
-                # Sayfa kaynağını al
-                soup = BeautifulSoup(sb.get_page_source(), 'html.parser')
-                
-                # 404 Kontrolü
-                if "Sayfa bulunamadı" in soup.text or sb.get_title() == "404 Not Found":
-                    print("🏁 Sayfa yok. Bitti.")
-                    break
+        print(f"\n📄 Sayfa {page_num} taranıyor: {list_url}")
+        
+        soup = get_soup_fast(list_url, cookies, user_agent)
+        
+        # Eğer çerezlerin süresi dolarsa (403), Selenium ile tekrar al (Opsiyonel Geliştirme)
+        if soup == "403":
+            print("🔄 Çerez süresi doldu, yenileniyor...")
+            cookies, user_agent = get_cookies_and_ua_with_selenium()
+            soup = get_soup_fast(list_url, cookies, user_agent)
 
-                links = soup.find_all('a', href=True)
-                series_urls = []
-                for link in links:
-                    href = link['href']
-                    if '/dizi/' in href and href.count('/') > 3:
-                        full_url = urljoin(BASE_DOMAIN, href)
-                        clean_url = full_url.split('?')[0]
-                        if clean_url not in series_urls:
-                            series_urls.append(clean_url)
-                
-                series_urls = list(set(series_urls))
-                
-                if not series_urls:
-                    print("⚠️ Dizi bulunamadı.")
-                    empty_page_count += 1
-                    if empty_page_count >= 2:
-                        break
-                    page_num += 1
-                    continue
-                
-                empty_page_count = 0
-                print(f"   🔍 {len(series_urls)} dizi bulundu.")
-
-                for s_url in series_urls:
-                    if any(s['url'] == s_url for s in all_series):
-                        print(f"   ⏭️ Zaten var: {s_url}")
-                        continue
-                    
-                    details = get_full_series_details(sb, s_url)
-                    if details:
-                        all_series.append(details)
-                        with open(DATA_FILE, 'w', encoding='utf-8') as f:
-                            json.dump(all_series, f, ensure_ascii=False, indent=2)
-
-            except Exception as e:
-                print(f"⚠️ Sayfa hatası: {e}")
-                # Hata alınca devam etmeye çalış
-                
+        if not soup or soup == "404":
+            print("🏁 Sayfa yok. Bitti.")
+            break
+        
+        links = soup.find_all('a', href=True)
+        series_urls = []
+        for link in links:
+            href = link['href']
+            if '/dizi/' in href and href.count('/') > 3:
+                full_url = urljoin(BASE_DOMAIN, href)
+                clean_url = full_url.split('?')[0]
+                if clean_url not in series_urls:
+                    series_urls.append(clean_url)
+        
+        series_urls = list(set(series_urls))
+        
+        if not series_urls:
+            print("⚠️ Dizi bulunamadı.")
+            empty_page_count += 1
+            if empty_page_count >= 2:
+                break
             page_num += 1
+            continue
+        
+        empty_page_count = 0
+        print(f"   🔍 {len(series_urls)} dizi bulundu.")
+
+        for s_url in series_urls:
+            if any(s['url'] == s_url for s in all_series):
+                print(f"   ⏭️ Zaten var: {s_url}")
+                continue
+            
+            details = get_full_series_details(s_url, cookies, user_agent)
+            if details:
+                all_series.append(details)
+                with open(DATA_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(all_series, f, ensure_ascii=False, indent=2)
+
+        page_num += 1
 
     print(f"\n✅ TAMAMLANDI. {len(all_series)} dizi kaydedildi.")
 
