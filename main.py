@@ -10,6 +10,7 @@ from urllib.parse import urljoin
 # --- AYARLAR ---
 BASE_DOMAIN = "https://dizipal.cx"
 DATA_FILE = 'movies.json'
+CHECK_LIMIT = 30  # Kaç tane 'zaten var' olan film görünce dursun?
 
 # Global Session (Hız için)
 session = requests.Session()
@@ -108,7 +109,9 @@ def get_full_movie_details(url, cookies, user_agent):
         "cast": [], 
         "year": "",
         "poster": "",
-        "cover_image": ""
+        "cover_image": "",
+        "platform": "Platform Dışı", # Varsayılan değer
+        "added_date": ""
     }
     
     if not soup or soup == "404": 
@@ -127,6 +130,26 @@ def get_full_movie_details(url, cookies, user_agent):
         # --- Video Kaynağı ---
         details["videoUrl"] = get_video_source(soup)
 
+        # --- YENİ ALANLAR: Platform, Tarih, Yıl (SVG ile) ---
+        
+        # 1. Platform Bilgisi
+        # Link içinde '/platform/' geçen a etiketini arıyoruz
+        platform_link = soup.find('a', href=lambda x: x and '/platform/' in x)
+        if platform_link:
+            details['platform'] = platform_link.get_text(strip=True)
+            
+        # 2. Eklenme Tarihi (Upload.svg ikonu ile)
+        # img src içinde 'Upload.svg' geçen görseli bulup ebeveynindeki metni alıyoruz
+        upload_icon = soup.find('img', src=lambda x: x and 'Upload.svg' in x)
+        if upload_icon:
+            # parent genelde h6 veya div olur, text'i oradan alıyoruz
+            details['added_date'] = upload_icon.parent.get_text(strip=True)
+
+        # 3. Yapım Yılı (Calendar.svg ikonu ile - Daha Kesin)
+        calendar_icon = soup.find('img', src=lambda x: x and 'Calendar.svg' in x)
+        if calendar_icon:
+            details['year'] = calendar_icon.parent.get_text(strip=True)
+
         # --- Açıklama ---
         summary_title = soup.find('h6', string=lambda t: t and 'Film Özeti' in t)
         if summary_title:
@@ -136,7 +159,8 @@ def get_full_movie_details(url, cookies, user_agent):
             summ = soup.find('p', class_='summary-text')
             if summ: details["description"] = summ.get_text(strip=True)
 
-        # --- Detay Kutuları ---
+        # --- Detay Kutuları (Eski Yöntem - Yedek) ---
+        # Eğer yukarıda Calendar.svg ile yıl bulunamadıysa buradan da bakabilir
         info_boxes = soup.find_all('div', class_=lambda x: x and 'rounded-[10px]' in x and 'bg-white/[4%]' in x)
         
         for box in info_boxes:
@@ -152,7 +176,8 @@ def get_full_movie_details(url, cookies, user_agent):
                         details["genres"] = [a.get_text(strip=True) for a in val_div.find_all('a')]
                     elif "Oyuncular" in label: 
                         details["cast"] = [a.get_text(strip=True) for a in val_div.find_all('a')]
-                    elif "Yapım Yılı" in label: 
+                    elif "Yapım Yılı" in label and not details["year"]: 
+                        # Sadece yukarıdaki SVG yöntemi bulamadıysa buradan al
                         details["year"] = val_div.get_text(strip=True)
 
     except Exception as e: 
@@ -162,7 +187,7 @@ def get_full_movie_details(url, cookies, user_agent):
     return details
 
 def main():
-    print("🛡️ Güneş TV: Film Botu Başlatılıyor (Hibrit Mod)...", flush=True)
+    print("🛡️ Güneş TV: Film Botu Başlatılıyor (Akıllı Güncelleme Modu)...", flush=True)
 
     # 1. ADIM: Selenium ile Çerezleri Al
     cookies, user_agent = get_cookies_and_ua_with_selenium()
@@ -171,23 +196,28 @@ def main():
         print("❌ Çerezler alınamadı, çıkılıyor.", flush=True)
         return
 
-    # 2. ADIM: Hızlı Tarama
+    # 2. ADIM: Mevcut Veriyi Yükle ve Hızlı Arama Seti Oluştur
     if os.path.exists(DATA_FILE):
         try:
             with open(DATA_FILE, 'r', encoding='utf-8') as f:
                 all_films = json.load(f)
-            print(f"📦 Mevcut veri: {len(all_films)} film.", flush=True)
+            # URL'leri hızlı kontrol için bir kümeye (set) alıyoruz
+            existing_urls = {movie.get('url') for movie in all_films if 'url' in movie}
+            print(f"📦 Mevcut veritabanı: {len(all_films)} film yüklendi.", flush=True)
         except:
             all_films = []
+            existing_urls = set()
     else:
         all_films = []
+        existing_urls = set()
 
     page_num = 1
     empty_page_count = 0
+    consecutive_existing_count = 0  # Arka arkaya kaç tane var olan film bulduk?
 
     while True:
         target_url = f"{BASE_DOMAIN}/filmler/page/{page_num}/"
-        print(f"\n--- 📄 SAYFA {page_num} ANALİZİ: {target_url} ---", flush=True)
+        print(f"\n--- 📄 SAYFA {page_num} ANALİZİ (Kontrol: {consecutive_existing_count}/{CHECK_LIMIT}) ---", flush=True)
         
         soup = get_soup_fast(target_url, cookies, user_agent)
         
@@ -222,12 +252,23 @@ def main():
                 title = link_element.get('title', '').strip()
                 movie_url = link_element.get('href', '')
                 
-                # Zaten var mı kontrolü
-                if any(f['url'] == movie_url for f in all_films if 'url' in f):
-                    print(f"   ⏭️ Zaten var: {title}", flush=True)
-                    continue
+                # --- AKILLI GÜNCELLEME MANTIĞI ---
+                if movie_url in existing_urls:
+                    consecutive_existing_count += 1
+                    print(f"   ⏭️ Zaten mevcut: {title} (Sayaç: {consecutive_existing_count}/{CHECK_LIMIT})", flush=True)
+                    
+                    if consecutive_existing_count >= CHECK_LIMIT:
+                        print(f"\n🛑 LİMİTE ULAŞILDI: Arka arkaya {CHECK_LIMIT} eski film bulundu.")
+                        print("   Güncel filmlerin hepsi tarandı, işlem bitiriliyor.")
+                        return  # Programı tamamen durdur
+                    
+                    continue # Bir sonraki filme geç
+                else:
+                    # Yeni bir film bulduk! Sayacı sıfırla.
+                    consecutive_existing_count = 0
+                    print(f"   🆕 Yeni Fİlm Tespit Edildi: {title}", flush=True)
 
-                print(f"   ▶️ Analiz: {title}", flush=True)
+                print(f"   ▶️ Analiz Ediliyor...", flush=True)
                 
                 # Detayları çek
                 meta = get_full_movie_details(movie_url, cookies, user_agent)
@@ -242,12 +283,13 @@ def main():
                 if meta and meta != "403":
                     meta['title'] = title # Listeden gelen başlığı garantiye al
                     all_films.append(meta)
+                    existing_urls.add(movie_url) # Hızlı listeye de ekle
                     
                     # Anlık Kayıt
                     with open(DATA_FILE, 'w', encoding='utf-8') as f:
                         json.dump(all_films, f, ensure_ascii=False, indent=2)
                     
-                    print(f"   ✅ Eklendi: {title} (Video: {'VAR' if meta['videoUrl'] else 'YOK'})", flush=True)
+                    print(f"   ✅ Eklendi: {title} | {meta['year']} | {meta['platform']}", flush=True)
                 else:
                     print(f"   ❌ Veri alınamadı: {title}", flush=True)
                 
